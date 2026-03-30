@@ -1,0 +1,40 @@
+## Unity
+[Ll]ibrary/
+[Tt]emp/
+[Oo]bj/
+[Bb]uild/
+[Bb]uilds/*/
+[Ll]ogs/
+[Uu]ser[Ss]ettings/
+MemoryCaptures/
+*.csproj.user
+*.sln.docstates
+*.unityproj
+*.pidb
+*.booproj
+*.svd
+*.pdb
+*.mdb
+*.opendb
+*.VC.db
+*.apk
+*.aab
+
+## Visual Studio / Rider
+.vs/
+.idea/
+*.suo
+*.user
+*.userprefs
+
+## .NET
+bin/
+obj/
+
+## Local smoke logs
+*.out.log
+*.err.log
+
+## OS
+Thumbs.db
+Desktop.ini
