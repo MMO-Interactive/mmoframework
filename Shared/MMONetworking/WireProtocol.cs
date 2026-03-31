@@ -153,6 +153,21 @@ public static class WireProtocol
                 writer.Write(prewarmResponse.DestinationZoneId);
                 writer.Write(prewarmResponse.ErrorText);
                 break;
+            case GameplayCommandMessage gameplayCommand:
+                WriteGuid(writer, gameplayCommand.SessionId);
+                writer.Write(gameplayCommand.CommandId);
+                writer.Write((byte)gameplayCommand.CommandKind);
+                writer.Write(gameplayCommand.TargetId);
+                break;
+            case GameplayResultMessage gameplayResult:
+                WriteGuid(writer, gameplayResult.SessionId);
+                writer.Write(gameplayResult.CommandId);
+                writer.Write(gameplayResult.Success);
+                writer.Write(gameplayResult.Text);
+                writer.Write(gameplayResult.ItemId);
+                writer.Write(gameplayResult.ItemCount);
+                writer.Write(gameplayResult.SkillValue);
+                break;
             default:
                 throw new InvalidDataException($"Unsupported TCP message type {message.GetType().Name}.");
         }
@@ -240,6 +255,19 @@ public static class WireProtocol
                 reader.ReadInt32(),
                 reader.ReadInt32(),
                 reader.ReadString()),
+            TcpMessageKind.GameplayCommand => new GameplayCommandMessage(
+                ReadGuid(reader),
+                reader.ReadUInt32(),
+                (GameplayCommandKind)reader.ReadByte(),
+                reader.ReadString()),
+            TcpMessageKind.GameplayResult => new GameplayResultMessage(
+                ReadGuid(reader),
+                reader.ReadUInt32(),
+                reader.ReadBoolean(),
+                reader.ReadString(),
+                reader.ReadString(),
+                reader.ReadInt32(),
+                reader.ReadInt32()),
             _ => throw new InvalidDataException($"Unsupported TCP message kind {kind}.")
         };
     }

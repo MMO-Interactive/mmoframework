@@ -204,6 +204,27 @@ public static class WireProtocol
             return;
         }
 
+        if (message is GameplayCommandMessage gameplayCommand)
+        {
+            WriteGuid(writer, gameplayCommand.SessionId);
+            writer.Write(gameplayCommand.CommandId);
+            writer.Write((byte)gameplayCommand.CommandKind);
+            writer.Write(gameplayCommand.TargetId);
+            return;
+        }
+
+        if (message is GameplayResultMessage gameplayResult)
+        {
+            WriteGuid(writer, gameplayResult.SessionId);
+            writer.Write(gameplayResult.CommandId);
+            writer.Write(gameplayResult.Success);
+            writer.Write(gameplayResult.Text);
+            writer.Write(gameplayResult.ItemId);
+            writer.Write(gameplayResult.ItemCount);
+            writer.Write(gameplayResult.SkillValue);
+            return;
+        }
+
         throw new InvalidDataException("Unsupported TCP message.");
     }
 
@@ -241,6 +262,10 @@ public static class WireProtocol
                 return new ZonePrewarmRequestMessage(ReadGuid(reader), reader.ReadInt32(), ReadVector3(reader));
             case TcpMessageKind.ZonePrewarmResponse:
                 return new ZonePrewarmResponseMessage(reader.ReadBoolean(), ReadGuid(reader), reader.ReadInt32(), reader.ReadInt32(), reader.ReadString());
+            case TcpMessageKind.GameplayCommand:
+                return new GameplayCommandMessage(ReadGuid(reader), reader.ReadUInt32(), (GameplayCommandKind)reader.ReadByte(), reader.ReadString());
+            case TcpMessageKind.GameplayResult:
+                return new GameplayResultMessage(ReadGuid(reader), reader.ReadUInt32(), reader.ReadBoolean(), reader.ReadString(), reader.ReadString(), reader.ReadInt32(), reader.ReadInt32());
             default:
                 throw new InvalidDataException("Unsupported TCP message kind.");
         }
