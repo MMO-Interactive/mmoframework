@@ -20,9 +20,10 @@ public sealed class ManagementDashboardHost
     private readonly InventoryStore _inventoryStore;
     private readonly CraftingStore _craftingStore;
     private readonly CharacterProgressionStore _progressionStore;
+    private readonly CombatStore _combatStore;
     private readonly int _port;
 
-    public ManagementDashboardHost(GatewayHost gatewayHost, SessionRegistry sessionRegistry, ZoneSupervisor zoneSupervisor, GameplayDefinitionStore gameplayDefinitions, ModerationStore moderationStore, InventoryStore inventoryStore, CraftingStore craftingStore, CharacterProgressionStore progressionStore, int port)
+    public ManagementDashboardHost(GatewayHost gatewayHost, SessionRegistry sessionRegistry, ZoneSupervisor zoneSupervisor, GameplayDefinitionStore gameplayDefinitions, ModerationStore moderationStore, InventoryStore inventoryStore, CraftingStore craftingStore, CharacterProgressionStore progressionStore, CombatStore combatStore, int port)
     {
         _gatewayHost = gatewayHost;
         _sessionRegistry = sessionRegistry;
@@ -32,6 +33,7 @@ public sealed class ManagementDashboardHost
         _inventoryStore = inventoryStore;
         _craftingStore = craftingStore;
         _progressionStore = progressionStore;
+        _combatStore = combatStore;
         _port = port;
     }
 
@@ -271,6 +273,41 @@ public sealed class ManagementDashboardHost
                 return Results.BadRequest(new { error = ex.Message });
             }
         });
+        app.MapGet("/api/combat", () => Results.Json(_combatStore.GetSnapshot()));
+        app.MapPost("/api/combat/ensure", async (HttpContext context) =>
+        {
+            var request = await JsonSerializer.DeserializeAsync<CombatEnsureRequest>(context.Request.Body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }, context.RequestAborted).ConfigureAwait(false);
+            if (request is null || string.IsNullOrWhiteSpace(request.AccountId))
+            {
+                return Results.BadRequest(new { error = "accountId is required." });
+            }
+
+            try
+            {
+                return Results.Json(_combatStore.EnsureCombatant(request.AccountId.Trim()));
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+        });
+        app.MapPost("/api/combat/attack", async (HttpContext context) =>
+        {
+            var request = await JsonSerializer.DeserializeAsync<CombatAttackRequest>(context.Request.Body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }, context.RequestAborted).ConfigureAwait(false);
+            if (request is null || string.IsNullOrWhiteSpace(request.AttackerAccountId) || string.IsNullOrWhiteSpace(request.TargetAccountId))
+            {
+                return Results.BadRequest(new { error = "attackerAccountId and targetAccountId are required." });
+            }
+
+            try
+            {
+                return Results.Json(_combatStore.Attack(request.AttackerAccountId.Trim(), request.TargetAccountId.Trim(), request.BaseDamage <= 0 ? 10 : request.BaseDamage));
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+        });
         app.MapGet("/", async context =>
         {
             context.Response.ContentType = "text/html; charset=utf-8";
@@ -325,6 +362,11 @@ public sealed class ManagementDashboardHost
         {
             context.Response.ContentType = "text/html; charset=utf-8";
             await context.Response.WriteAsync(BuildProgressionPage(), cancellationToken);
+        });
+        app.MapGet("/tools/combat", async context =>
+        {
+            context.Response.ContentType = "text/html; charset=utf-8";
+            await context.Response.WriteAsync(BuildCombatPage(), cancellationToken);
         });
         app.MapGet("/map", async context =>
         {
@@ -547,6 +589,7 @@ public sealed class ManagementDashboardHost
       <div class="badge"><a href="/tools/inventory" style="color:inherit;text-decoration:none;">Inventory Tool</a></div>
       <div class="badge"><a href="/tools/crafting" style="color:inherit;text-decoration:none;">Crafting Tool</a></div>
       <div class="badge"><a href="/tools/progression" style="color:inherit;text-decoration:none;">Progression Tool</a></div>
+      <div class="badge"><a href="/tools/combat" style="color:inherit;text-decoration:none;">Combat Tool</a></div>
       <h1>Live zone and session control surface.</h1>
       <div class="sub">
         This view reflects the in-process MMO runtime. It is intended for basic operations now: gateway health, online sessions, zone populations, and transfer activity.
@@ -627,6 +670,7 @@ public sealed class ManagementDashboardHost
           <li><a href="/tools/inventory">Inventory</a></li>
           <li><a href="/tools/crafting">Crafting</a></li>
           <li><a href="/tools/progression">Progression</a></li>
+          <li><a href="/tools/combat">Combat</a></li>
         </ul>
       </article>
     </section>
@@ -743,6 +787,7 @@ public sealed class ManagementDashboardHost
       <a class="tool" href="/tools/inventory"><strong>Inventory</strong><span class="muted">Load accounts and perform add/move/split/remove operations.</span></a>
       <a class="tool" href="/tools/crafting"><strong>Crafting</strong><span class="muted">Manage recipes and execute crafts against account inventory.</span></a>
       <a class="tool" href="/tools/progression"><strong>Progression</strong><span class="muted">Inspect and grant XP tracks (crafting, gathering, etc.).</span></a>
+      <a class="tool" href="/tools/combat"><strong>Combat</strong><span class="muted">Spawn combatants and run attack simulations with logs.</span></a>
       <a class="tool" href="/map"><strong>Operations Map</strong><span class="muted">Visualize sessions, movement, and transfers.</span></a>
     </section>
   </div>
@@ -800,6 +845,7 @@ public sealed class ManagementDashboardHost
         <a class="btn" href="/tools/inventory">Inventory</a>
         <a class="btn" href="/tools/crafting">Crafting</a>
         <a class="btn" href="/tools/progression">Progression</a>
+        <a class="btn" href="/tools/combat">Combat</a>
       </div>
     </section>
     <section class="card">
@@ -1083,6 +1129,8 @@ public sealed class ManagementDashboardHost
     private sealed record InventoryRemoveRequest(string AccountId, int SlotIndex, int Quantity, int Capacity = 40);
     private sealed record CraftingExecuteRequest(string AccountId, string RecipeId, int OutputMaxStack = 200, int Capacity = 40);
     private sealed record GrantProgressionRequest(string AccountId, string TrackId, int Experience);
+    private sealed record CombatEnsureRequest(string AccountId);
+    private sealed record CombatAttackRequest(string AttackerAccountId, string TargetAccountId, int BaseDamage = 10);
 
     private string BuildInventoryPage()
     {
@@ -1116,6 +1164,7 @@ public sealed class ManagementDashboardHost
         <a class="btn" href="/tools/moderation">Moderation</a>
         <a class="btn" href="/tools/crafting">Crafting</a>
         <a class="btn" href="/tools/progression">Progression</a>
+        <a class="btn" href="/tools/combat">Combat</a>
       </div>
       <p class="muted">Load an account inventory and perform add/move/split/remove operations persisted in SQLite.</p>
     </section>
@@ -1490,6 +1539,121 @@ public sealed class ManagementDashboardHost
 
     byId('loadBtn').addEventListener('click', () => load().catch(err => byId('status').textContent = err.message));
     byId('grantBtn').addEventListener('click', () => grant().catch(err => byId('status').textContent = err.message));
+  </script>
+</body>
+</html>
+""";
+
+        return html;
+    }
+
+    private string BuildCombatPage()
+    {
+        var html = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Combat Tools</title>
+  <style>
+    body { margin: 0; font-family: Georgia, "Palatino Linotype", serif; background: #f3ebdf; color: #26170f; }
+    .wrap { width: min(1100px, calc(100vw - 32px)); margin: 0 auto; padding: 24px 0 36px; display: grid; gap: 16px; }
+    .card { background: rgba(255,255,255,0.85); border: 1px solid rgba(61,43,31,0.14); border-radius: 18px; padding: 16px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    input { padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(61,43,31,0.2); min-width: 140px; }
+    button, a.btn { display: inline-flex; align-items: center; border-radius: 999px; border: 1px solid rgba(61,43,31,0.2); background: #fff; color: #26170f; padding: 8px 14px; text-decoration: none; cursor: pointer; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.93rem; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid rgba(61,43,31,0.1); vertical-align: top; }
+    .muted { color: #6a5547; font-size: 0.92rem; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="card">
+      <h1>Combat Runtime Tools</h1>
+      <div class="row">
+        <a class="btn" href="/">Dashboard</a>
+        <a class="btn" href="/tools">Tools Home</a>
+      </div>
+      <p class="muted">Create combatants and run attack simulations to evolve gameplay systems.</p>
+    </section>
+    <section class="card">
+      <div class="row">
+        <input id="ensureAccount" placeholder="accountId" />
+        <button id="ensureBtn">Ensure Combatant</button>
+      </div>
+      <div class="row">
+        <input id="attacker" placeholder="attackerAccountId" />
+        <input id="target" placeholder="targetAccountId" />
+        <input id="damage" placeholder="baseDamage" value="10" />
+        <button id="attackBtn">Attack</button>
+      </div>
+      <div id="status" class="muted">Idle</div>
+    </section>
+    <section class="card">
+      <h2>Combatants</h2>
+      <table><thead><tr><th>Account</th><th>HP</th><th>Stamina</th><th>Deaths</th></tr></thead><tbody id="combatants"></tbody></table>
+      <h2>Recent Actions</h2>
+      <table><thead><tr><th>Action</th><th>Attacker</th><th>Target</th><th>Damage</th><th>HP Left</th><th>Notes</th></tr></thead><tbody id="actions"></tbody></table>
+    </section>
+  </div>
+  <script>
+    function byId(id) { return document.getElementById(id); }
+
+    function render(snapshot) {
+      byId('combatants').innerHTML = (snapshot.combatants || []).map(c => `
+        <tr><td>${c.accountId}</td><td>${c.hitPoints}/${c.maxHitPoints}</td><td>${c.stamina}</td><td>${c.deaths}</td></tr>`).join('');
+      byId('actions').innerHTML = (snapshot.recentActions || []).map(a => `
+        <tr><td>${a.actionType}</td><td>${a.attackerAccountId}</td><td>${a.targetAccountId}</td><td>${a.damage}</td><td>${a.remainingHitPoints}</td><td>${a.notes}</td></tr>`).join('');
+    }
+
+    async function refresh() {
+      const response = await fetch('/api/combat', { cache: 'no-store' });
+      const data = await response.json();
+      render(data);
+    }
+
+    async function ensureCombatant() {
+      const payload = { accountId: byId('ensureAccount').value.trim() };
+      const response = await fetch('/api/combat/ensure', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        byId('status').textContent = data.error || 'Ensure failed';
+        return;
+      }
+      render(data);
+      byId('status').textContent = `Ensured combatant ${payload.accountId}`;
+    }
+
+    async function attack() {
+      const payload = {
+        attackerAccountId: byId('attacker').value.trim(),
+        targetAccountId: byId('target').value.trim(),
+        baseDamage: parseInt(byId('damage').value || '10', 10)
+      };
+      const response = await fetch('/api/combat/attack', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        byId('status').textContent = data.error || 'Attack failed';
+        return;
+      }
+      render(data);
+      byId('status').textContent = `${payload.attackerAccountId} attacked ${payload.targetAccountId}`;
+    }
+
+    byId('ensureBtn').addEventListener('click', () => ensureCombatant().catch(err => byId('status').textContent = err.message));
+    byId('attackBtn').addEventListener('click', () => attack().catch(err => byId('status').textContent = err.message));
+    refresh();
+    setInterval(refresh, 3000);
   </script>
 </body>
 </html>

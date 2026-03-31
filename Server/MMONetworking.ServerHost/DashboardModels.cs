@@ -166,3 +166,24 @@ public sealed record ProgressionTrackSnapshot(
     int Level,
     int Experience,
     int ExperienceToNextLevel);
+
+public sealed record CombatantSnapshot(
+    string AccountId,
+    int HitPoints,
+    int MaxHitPoints,
+    int Stamina,
+    int Deaths);
+
+public sealed record CombatActionSnapshot(
+    long Id,
+    string ActionType,
+    string AttackerAccountId,
+    string TargetAccountId,
+    int Damage,
+    int RemainingHitPoints,
+    string Notes,
+    DateTimeOffset CreatedAtUtc);
+
+public sealed record CombatSnapshot(
+    CombatantSnapshot[] Combatants,
+    CombatActionSnapshot[] RecentActions);
