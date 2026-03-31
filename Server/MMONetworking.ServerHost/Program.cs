@@ -21,10 +21,14 @@ public static class Program
         var zoneDirectory = new ZoneDirectory(zones);
         var sessionRegistry = new SessionRegistry();
         var ghostRegistry = new GhostRegistry();
+        var moderationStore = new ModerationStore(Path.Combine(workspaceRoot, "Documents", "GameplayDefinitions.db"));
+        var inventoryStore = new InventoryStore(Path.Combine(workspaceRoot, "Documents", "GameplayDefinitions.db"));
+        var craftingStore = new CraftingStore(Path.Combine(workspaceRoot, "Documents", "GameplayDefinitions.db"));
         var zoneSupervisor = new ZoneSupervisor(zoneDirectory, sessionRegistry, ghostRegistry, runtimeSettings);
-        var gateway = new GatewayHost(zoneDirectory, sessionRegistry, zoneSupervisor, port: 7000);
+        var gateway = new GatewayHost(zoneDirectory, sessionRegistry, zoneSupervisor, moderationStore, port: 7000);
         var zoneControl = new ZoneControlHost(zoneDirectory, sessionRegistry, zoneSupervisor, runtimeSettings, port: runtimeSettings.ZoneControlPort);
-        var dashboard = new ManagementDashboardHost(gateway, sessionRegistry, zoneSupervisor, port: 7080);
+        var gameplayDefinitions = new GameplayDefinitionStore(Path.Combine(workspaceRoot, "Documents", "GameplayDefinitions.db"), zoneDirectory);
+        var dashboard = new ManagementDashboardHost(gateway, sessionRegistry, zoneSupervisor, gameplayDefinitions, moderationStore, inventoryStore, craftingStore, port: 7080);
 
         using var cancellation = new CancellationTokenSource();
         Console.CancelKeyPress += (_, args) =>

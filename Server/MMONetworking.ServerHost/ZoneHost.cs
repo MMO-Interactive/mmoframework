@@ -307,7 +307,7 @@ public sealed class ZoneHost : IDisposable
                     await _udpClient.SendAsync(payload, payload.Length, player.RemoteEndpoint).ConfigureAwait(false);
                 }
 
-                foreach (var stalePlayer in playerList.Where(player => _sessionRegistry.TryGet(player.SessionId, out var session) && session!.CurrentZoneId != _definition.ZoneId).ToArray())
+                foreach (var stalePlayer in playerList.Where(player => !_sessionRegistry.TryGet(player.SessionId, out var session) || session!.CurrentZoneId != _definition.ZoneId).ToArray())
                 {
                     _players.TryRemove(stalePlayer.SessionId, out _);
                 }

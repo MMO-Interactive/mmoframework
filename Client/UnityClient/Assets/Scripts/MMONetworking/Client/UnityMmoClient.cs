@@ -29,6 +29,7 @@ public sealed class UnityMmoClient : MonoBehaviour
     private CancellationTokenSource _sessionCancellation;
     private ZoneConnection _activeConnection;
     private uint _inputSequence;
+    private uint _gameplayCommandSequence;
 
     private async void Start()
     {
@@ -44,6 +45,21 @@ public sealed class UnityMmoClient : MonoBehaviour
         while (_mainThreadActions.TryDequeue(out var action))
         {
             action.Invoke();
+        }
+
+        if (_activeConnection != null && Input.GetKeyDown(KeyCode.G))
+        {
+            _ = SendGatherCommandAsync("tree-1");
+        }
+
+        if (_activeConnection != null && Input.GetKeyDown(KeyCode.H))
+        {
+            _ = SendGatherCommandAsync("ore-1");
+        }
+
+        if (_activeConnection != null && Input.GetKeyDown(KeyCode.I))
+        {
+            _ = SendInspectInventoryAsync();
         }
     }
 
@@ -194,7 +210,7 @@ public sealed class UnityMmoClient : MonoBehaviour
 
             CurrentZoneId = newZoneId;
             AuthoritativePosition = next.SpawnPosition;
-            StatusText = "Connected to zone " + newZoneId;
+            StatusText = "Connected to zone " + newZoneId + " (G tree / H ore / I inventory)";
 
             if (previousZoneId != 0 && previousZoneId != newZoneId)
             {
@@ -259,6 +275,46 @@ public sealed class UnityMmoClient : MonoBehaviour
         _ = Task.Run(() => ProbeLoopAsync(connection), connection.Cancellation.Token);
     }
 
+    private async Task SendGatherCommandAsync(string targetId)
+    {
+        var connection = _activeConnection;
+        if (connection == null)
+        {
+            return;
+        }
+
+        try
+        {
+            var command = new GameplayCommandMessage(SessionId, ++_gameplayCommandSequence, GameplayCommandKind.Gather, targetId);
+            await connection.SendControlMessageAsync(command).ConfigureAwait(false);
+            _mainThreadActions.Enqueue(() => StatusText = "Gathering from " + targetId + "...");
+        }
+        catch (Exception ex)
+        {
+            Debug.LogException(ex);
+        }
+    }
+
+    private async Task SendInspectInventoryAsync()
+    {
+        var connection = _activeConnection;
+        if (connection == null)
+        {
+            return;
+        }
+
+        try
+        {
+            var command = new GameplayCommandMessage(SessionId, ++_gameplayCommandSequence, GameplayCommandKind.InspectInventory, string.Empty);
+            await connection.SendControlMessageAsync(command).ConfigureAwait(false);
+            _mainThreadActions.Enqueue(() => StatusText = "Requesting inventory...");
+        }
+        catch (Exception ex)
+        {
+            Debug.LogException(ex);
+        }
+    }
+
     private async Task ControlLoopAsync(ZoneConnection connection)
     {
         try
@@ -283,6 +339,13 @@ public sealed class UnityMmoClient : MonoBehaviour
                 if (message is ErrorMessage error)
                 {
                     _mainThreadActions.Enqueue(() => StatusText = error.Text);
+                }
+
+                var gameplayResult = message as GameplayResultMessage;
+                if (gameplayResult != null)
+                {
+                    _mainThreadActions.Enqueue(() =>
+                        StatusText = gameplayResult.Text + " | " + gameplayResult.ItemId + ": " + gameplayResult.ItemCount + " | Gathering " + gameplayResult.SkillValue);
                 }
             }
         }
@@ -401,6 +464,19 @@ public sealed class UnityMmoClient : MonoBehaviour
         public int ZoneUdpPort { get; }
         public bool HasSeenUdpTraffic { get; set; }
 
+        public async Task SendControlMessageAsync(TcpMessage message)
+        {
+            await _controlWriteLock.WaitAsync(Cancellation.Token).ConfigureAwait(false);
+            try
+            {
+                await WireProtocol.WriteTcpMessageAsync(Stream, message, Cancellation.Token).ConfigureAwait(false);
+            }
+            finally
+            {
+                _controlWriteLock.Release();
+            }
+        }
+
         public void Dispose()
         {
             Cancellation.Cancel();
@@ -409,6 +485,8 @@ public sealed class UnityMmoClient : MonoBehaviour
             Stream.Dispose();
             TcpClient.Dispose();
         }
+
+        private readonly SemaphoreSlim _controlWriteLock = new SemaphoreSlim(1, 1);
     }
 }
 }

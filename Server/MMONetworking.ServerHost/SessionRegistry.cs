@@ -27,6 +27,9 @@ public sealed class SessionRegistry
     public bool TryGet(Guid sessionId, out SessionRecord? session)
         => _sessions.TryGetValue(sessionId, out session);
 
+    public bool TryRemove(Guid sessionId, out SessionRecord? session)
+        => _sessions.TryRemove(sessionId, out session);
+
     public string IssueTransferToken(Guid sessionId, int zoneId, NetworkVector3 spawnPosition)
     {
         if (!_sessions.TryGetValue(sessionId, out var session))

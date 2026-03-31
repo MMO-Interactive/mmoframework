@@ -13,17 +13,19 @@ public sealed class GatewayHost
     private readonly ZoneDirectory _zoneDirectory;
     private readonly SessionRegistry _sessionRegistry;
     private readonly ZoneSupervisor _zoneSupervisor;
+    private readonly ModerationStore _moderationStore;
     private readonly TcpListener _listener;
     private long _connectionAttempts;
     private long _successfulLogins;
     private long _errors;
     private readonly int _port;
 
-    public GatewayHost(ZoneDirectory zoneDirectory, SessionRegistry sessionRegistry, ZoneSupervisor zoneSupervisor, int port)
+    public GatewayHost(ZoneDirectory zoneDirectory, SessionRegistry sessionRegistry, ZoneSupervisor zoneSupervisor, ModerationStore moderationStore, int port)
     {
         _zoneDirectory = zoneDirectory;
         _sessionRegistry = sessionRegistry;
         _zoneSupervisor = zoneSupervisor;
+        _moderationStore = moderationStore;
         _port = port;
         _listener = new TcpListener(IPAddress.Any, port);
     }
@@ -65,6 +67,12 @@ public sealed class GatewayHost
                 if (hello.ProtocolVersion != WireProtocol.CurrentProtocolVersion)
                 {
                     await WireProtocol.WriteTcpMessageAsync(stream, new ErrorMessage("Protocol mismatch."), cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+
+                if (_moderationStore.IsAccountBanned(hello.AccountId))
+                {
+                    await WireProtocol.WriteTcpMessageAsync(stream, new ErrorMessage("Account is banned."), cancellationToken).ConfigureAwait(false);
                     return;
                 }
 
