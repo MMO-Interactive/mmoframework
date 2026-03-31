@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Concurrent;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Net;
@@ -20,6 +21,8 @@ public sealed class UnityZoneServerRuntime : IDisposable
     private readonly UdpClient _udpClient;
     private readonly ConcurrentDictionary<Guid, ZonePlayer> _players = new();
     private readonly CancellationTokenSource _shutdown = new();
+    private readonly Dictionary<string, ResourceNode> _resourceNodes;
+    private readonly object _resourceSync = new();
     private uint _tick;
 
     public UnityZoneServerRuntime(ZoneDefinition definition, string controlHost, int controlPort, float prewarmMargin)
@@ -30,6 +33,7 @@ public sealed class UnityZoneServerRuntime : IDisposable
         _prewarmMargin = prewarmMargin;
         _tcpListener = new TcpListener(IPAddress.Any, definition.TcpPort);
         _udpClient = new UdpClient(definition.UdpPort);
+        _resourceNodes = CreateDefaultResourceNodes(definition);
     }
 
     public int ActivePlayers => _players.Count;
@@ -103,6 +107,7 @@ public sealed class UnityZoneServerRuntime : IDisposable
                 player.Position = authorized.SpawnPosition;
                 player.PendingDestinationZoneId = null;
                 player.LastIssuedTransferId = null;
+                player.GatheringSkill = Math.Max(player.GatheringSkill, 1);
 
                 player.ControlStream = stream;
                 await WireProtocol.WriteTcpMessageAsync(
@@ -116,6 +121,12 @@ public sealed class UnityZoneServerRuntime : IDisposable
                     if (message is HeartbeatMessage)
                     {
                         continue;
+                    }
+
+                    var gameplayCommand = message as GameplayCommandMessage;
+                    if (gameplayCommand != null)
+                    {
+                        await HandleGameplayCommandAsync(player, gameplayCommand, cancellationToken).ConfigureAwait(false);
                     }
                 }
             }
@@ -197,6 +208,7 @@ public sealed class UnityZoneServerRuntime : IDisposable
         {
             await Task.Delay(50, cancellationToken).ConfigureAwait(false);
             _tick++;
+            RegenerateResourceNodes();
 
             foreach (var player in _players.Values.ToArray())
             {
@@ -235,6 +247,184 @@ public sealed class UnityZoneServerRuntime : IDisposable
         }
     }
 
+    private async Task HandleGameplayCommandAsync(ZonePlayer player, GameplayCommandMessage command, CancellationToken cancellationToken)
+    {
+        if (command.SessionId != player.SessionId)
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Session mismatch.", string.Empty, 0, player.GatheringSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        switch (command.CommandKind)
+        {
+            case GameplayCommandKind.Gather:
+                await HandleGatherAsync(player, command, cancellationToken).ConfigureAwait(false);
+                return;
+            case GameplayCommandKind.InspectInventory:
+                await SendToPlayerAsync(
+                    player,
+                    new GameplayResultMessage(
+                        command.SessionId,
+                        command.CommandId,
+                        true,
+                        BuildInventorySummary(player),
+                        string.Empty,
+                        0,
+                        player.GatheringSkill),
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            default:
+                await SendToPlayerAsync(
+                    player,
+                    new GameplayResultMessage(command.SessionId, command.CommandId, false, "Unsupported gameplay command.", string.Empty, 0, player.GatheringSkill),
+                    cancellationToken).ConfigureAwait(false);
+                return;
+        }
+    }
+
+    private async Task HandleGatherAsync(ZonePlayer player, GameplayCommandMessage command, CancellationToken cancellationToken)
+    {
+        if (DateTimeOffset.UtcNow < player.NextGatherAllowedUtc)
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Gather on cooldown.", string.Empty, 0, player.GatheringSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        ResourceNode node;
+        lock (_resourceSync)
+        {
+            _resourceNodes.TryGetValue(command.TargetId, out node);
+        }
+
+        if (node == null)
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Unknown resource node.", string.Empty, 0, player.GatheringSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var distanceSq = DistanceSquared(player.Position, node.Position);
+        if (distanceSq > 25f)
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Too far away to gather.", string.Empty, 0, player.GatheringSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var gathered = false;
+        lock (_resourceSync)
+        {
+            if (node.Remaining > 0)
+            {
+                node.Remaining--;
+                node.LastHarvestedUtc = DateTimeOffset.UtcNow;
+                gathered = true;
+            }
+        }
+
+        if (!gathered)
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Node is depleted.", node.ItemId, player.GetItemCount(node.ItemId), player.GatheringSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var amount = Math.Max(1, player.GatheringSkill / 10);
+        player.AddItem(node.ItemId, amount);
+        player.GatherAttempts++;
+        if (player.GatherAttempts % 3 == 0)
+        {
+            player.GatheringSkill++;
+        }
+
+        player.NextGatherAllowedUtc = DateTimeOffset.UtcNow.AddMilliseconds(750);
+        await SendToPlayerAsync(
+            player,
+            new GameplayResultMessage(
+                command.SessionId,
+                command.CommandId,
+                true,
+                "Gathered " + amount + " " + node.ItemId + ".",
+                node.ItemId,
+                player.GetItemCount(node.ItemId),
+                player.GatheringSkill),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task SendToPlayerAsync(ZonePlayer player, TcpMessage message, CancellationToken cancellationToken)
+    {
+        var stream = player.ControlStream;
+        if (stream == null)
+        {
+            return;
+        }
+
+        await player.ControlWriteLock.WaitAsync(cancellationToken).ConfigureAwait(false);
+        try
+        {
+            await WireProtocol.WriteTcpMessageAsync(stream, message, cancellationToken).ConfigureAwait(false);
+        }
+        finally
+        {
+            player.ControlWriteLock.Release();
+        }
+    }
+
+    private void RegenerateResourceNodes()
+    {
+        lock (_resourceSync)
+        {
+            foreach (var node in _resourceNodes.Values)
+            {
+                if (node.Remaining >= node.MaxAmount)
+                {
+                    continue;
+                }
+
+                if (DateTimeOffset.UtcNow - node.LastHarvestedUtc >= TimeSpan.FromSeconds(8))
+                {
+                    node.Remaining++;
+                }
+            }
+        }
+    }
+
+    private static Dictionary<string, ResourceNode> CreateDefaultResourceNodes(ZoneDefinition definition)
+    {
+        var midZ = (definition.MinZ + definition.MaxZ) * 0.5f;
+        return new Dictionary<string, ResourceNode>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["tree-1"] = new ResourceNode("tree-1", "log", new NetworkVector3(definition.MinX + 8f, 0f, midZ - 6f), 6),
+            ["ore-1"] = new ResourceNode("ore-1", "ore", new NetworkVector3(definition.MinX + 14f, 0f, midZ + 6f), 5)
+        };
+    }
+
+    private static float DistanceSquared(NetworkVector3 a, NetworkVector3 b)
+    {
+        var dx = a.X - b.X;
+        var dz = a.Z - b.Z;
+        return (dx * dx) + (dz * dz);
+    }
+
+    private static string BuildInventorySummary(ZonePlayer player)
+    {
+        var logCount = player.GetItemCount("log");
+        var oreCount = player.GetItemCount("ore");
+        return "Inventory -> log: " + logCount + ", ore: " + oreCount + " | Gathering " + player.GatheringSkill;
+    }
+
     private async Task MaybeTransferAsync(ZonePlayer player, CancellationToken cancellationToken)
     {
         if (_definition.Contains(player.Position) || player.PendingDestinationZoneId.HasValue || player.ControlStream == null)
@@ -256,8 +446,8 @@ public sealed class UnityZoneServerRuntime : IDisposable
         Debug.Log("Unity zone " + _definition.ZoneId + " transferring player " + player.PlayerId + " to zone " + response.ToZoneId + ".");
         try
         {
-            await WireProtocol.WriteTcpMessageAsync(
-                player.ControlStream,
+            await SendToPlayerAsync(
+                player,
                 new ZoneTransferPrepareMessage(
                     player.SessionId,
                     player.LastIssuedTransferId.Value,
@@ -438,6 +628,45 @@ public sealed class UnityZoneServerRuntime : IDisposable
         public int? PendingDestinationZoneId { get; set; }
         public Guid? LastIssuedTransferId { get; set; }
         public int? LastPrewarmedZoneId { get; set; }
+        public int GatheringSkill { get; set; }
+        public int GatherAttempts { get; set; }
+        public DateTimeOffset NextGatherAllowedUtc { get; set; }
+        public SemaphoreSlim ControlWriteLock { get; } = new SemaphoreSlim(1, 1);
+
+        private readonly Dictionary<string, int> _inventory = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
+
+        public void AddItem(string itemId, int amount)
+        {
+            int existing;
+            _inventory.TryGetValue(itemId, out existing);
+            _inventory[itemId] = existing + amount;
+        }
+
+        public int GetItemCount(string itemId)
+        {
+            int count;
+            return _inventory.TryGetValue(itemId, out count) ? count : 0;
+        }
+    }
+
+    private sealed class ResourceNode
+    {
+        public ResourceNode(string nodeId, string itemId, NetworkVector3 position, int maxAmount)
+        {
+            NodeId = nodeId;
+            ItemId = itemId;
+            Position = position;
+            MaxAmount = maxAmount;
+            Remaining = maxAmount;
+            LastHarvestedUtc = DateTimeOffset.UtcNow;
+        }
+
+        public string NodeId { get; }
+        public string ItemId { get; }
+        public NetworkVector3 Position { get; }
+        public int MaxAmount { get; }
+        public int Remaining { get; set; }
+        public DateTimeOffset LastHarvestedUtc { get; set; }
     }
 }
 }
