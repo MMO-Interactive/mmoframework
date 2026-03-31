@@ -1094,7 +1094,38 @@ public sealed class ManagementDashboardHost
       render(data);
     }
 
+    async function loadDefinitions() {
+      const response = await fetch('/api/gameplay-definitions', { cache: 'no-store' });
+      const data = await response.json();
+      document.getElementById('definitionsJson').value = JSON.stringify(data, null, 2);
+      document.getElementById('definitionStatus').textContent = `Definitions loaded ${new Date().toLocaleTimeString()}`;
+    }
+
+    async function saveDefinitions() {
+      const raw = document.getElementById('definitionsJson').value;
+      try {
+        const payload = JSON.parse(raw);
+        const response = await fetch('/api/gameplay-definitions', {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          throw new Error(result.error || 'Failed to save definitions');
+        }
+        document.getElementById('definitionsJson').value = JSON.stringify(result, null, 2);
+        document.getElementById('definitionStatus').textContent = `Definitions saved ${new Date().toLocaleTimeString()}`;
+      } catch (err) {
+        document.getElementById('definitionStatus').textContent = `Save failed: ${err.message}`;
+      }
+    }
+
+    document.getElementById('reloadDefinitions').addEventListener('click', loadDefinitions);
+    document.getElementById('saveDefinitions').addEventListener('click', saveDefinitions);
+
     refresh();
+    loadDefinitions();
     setInterval(refresh, 1500);
   </script>
 </body>
