@@ -24,7 +24,8 @@ public static class Program
         var zoneSupervisor = new ZoneSupervisor(zoneDirectory, sessionRegistry, ghostRegistry, runtimeSettings);
         var gateway = new GatewayHost(zoneDirectory, sessionRegistry, zoneSupervisor, port: 7000);
         var zoneControl = new ZoneControlHost(zoneDirectory, sessionRegistry, zoneSupervisor, runtimeSettings, port: runtimeSettings.ZoneControlPort);
-        var dashboard = new ManagementDashboardHost(gateway, sessionRegistry, zoneSupervisor, port: 7080);
+        var gameplayDefinitions = new GameplayDefinitionStore(Path.Combine(workspaceRoot, "Documents", "GameplayDefinitions.json"), zoneDirectory);
+        var dashboard = new ManagementDashboardHost(gateway, sessionRegistry, zoneSupervisor, gameplayDefinitions, port: 7080);
 
         using var cancellation = new CancellationTokenSource();
         Console.CancelKeyPress += (_, args) =>

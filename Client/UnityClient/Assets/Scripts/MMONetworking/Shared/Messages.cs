@@ -18,7 +18,9 @@ public enum TcpMessageKind : ushort
     ZoneTransferRequest = 103,
     ZoneTransferResponse = 104,
     ZonePrewarmRequest = 105,
-    ZonePrewarmResponse = 106
+    ZonePrewarmResponse = 106,
+    GameplayCommand = 200,
+    GameplayResult = 201
 }
 
 public enum UdpMessageKind : ushort
@@ -284,6 +286,50 @@ public sealed class ZonePrewarmResponseMessage : TcpMessage
     public int ZoneId { get; }
     public int DestinationZoneId { get; }
     public string ErrorText { get; }
+}
+
+public enum GameplayCommandKind : byte
+{
+    Gather = 1,
+    InspectInventory = 2
+}
+
+public sealed class GameplayCommandMessage : TcpMessage
+{
+    public GameplayCommandMessage(Guid sessionId, uint commandId, GameplayCommandKind commandKind, string targetId) : base(TcpMessageKind.GameplayCommand)
+    {
+        SessionId = sessionId;
+        CommandId = commandId;
+        CommandKind = commandKind;
+        TargetId = targetId;
+    }
+
+    public Guid SessionId { get; }
+    public uint CommandId { get; }
+    public GameplayCommandKind CommandKind { get; }
+    public string TargetId { get; }
+}
+
+public sealed class GameplayResultMessage : TcpMessage
+{
+    public GameplayResultMessage(Guid sessionId, uint commandId, bool success, string text, string itemId, int itemCount, int skillValue) : base(TcpMessageKind.GameplayResult)
+    {
+        SessionId = sessionId;
+        CommandId = commandId;
+        Success = success;
+        Text = text;
+        ItemId = itemId;
+        ItemCount = itemCount;
+        SkillValue = skillValue;
+    }
+
+    public Guid SessionId { get; }
+    public uint CommandId { get; }
+    public bool Success { get; }
+    public string Text { get; }
+    public string ItemId { get; }
+    public int ItemCount { get; }
+    public int SkillValue { get; }
 }
 
 public sealed class ClientInputMessage : UdpMessage

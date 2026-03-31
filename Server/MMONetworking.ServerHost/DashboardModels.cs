@@ -64,3 +64,44 @@ public sealed record ZonePlayerSnapshot(
     float VelocityY,
     float VelocityZ,
     int? PendingDestinationZoneId);
+
+public sealed record GameplayDefinitionsSnapshot(
+    ItemDefinitionSnapshot[] Items,
+    SkillDefinitionSnapshot[] Skills,
+    ResourceDefinitionSnapshot[] Resources,
+    ResourceNodeDefinitionSnapshot[] Nodes,
+    ZoneDefinitionSnapshot[] Zones);
+
+public sealed record ItemDefinitionSnapshot(
+    string Id,
+    string Name,
+    int MaxStack,
+    float BaseWeight);
+
+public sealed record SkillDefinitionSnapshot(
+    string Id,
+    string Name,
+    int MaxValue);
+
+public sealed record ResourceDefinitionSnapshot(
+    string Id,
+    string Name,
+    string ItemId,
+    int BaseYield);
+
+public sealed record ResourceNodeDefinitionSnapshot(
+    string Id,
+    int ZoneId,
+    string ResourceId,
+    float PositionX,
+    float PositionY,
+    float PositionZ,
+    int RespawnSeconds);
+
+public sealed record ZoneDefinitionSnapshot(
+    int ZoneId,
+    string Name,
+    float MinX,
+    float MaxX,
+    float MinZ,
+    float MaxZ);
