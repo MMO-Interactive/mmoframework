@@ -156,3 +156,13 @@ public sealed record CraftingResultSnapshot(
     string AccountId,
     string RecipeId,
     InventorySnapshot Inventory);
+
+public sealed record CharacterProgressionSnapshot(
+    string AccountId,
+    ProgressionTrackSnapshot[] Tracks);
+
+public sealed record ProgressionTrackSnapshot(
+    string TrackId,
+    int Level,
+    int Experience,
+    int ExperienceToNextLevel);

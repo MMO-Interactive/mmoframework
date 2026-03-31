@@ -19,9 +19,10 @@ public sealed class ManagementDashboardHost
     private readonly ModerationStore _moderationStore;
     private readonly InventoryStore _inventoryStore;
     private readonly CraftingStore _craftingStore;
+    private readonly CharacterProgressionStore _progressionStore;
     private readonly int _port;
 
-    public ManagementDashboardHost(GatewayHost gatewayHost, SessionRegistry sessionRegistry, ZoneSupervisor zoneSupervisor, GameplayDefinitionStore gameplayDefinitions, ModerationStore moderationStore, InventoryStore inventoryStore, CraftingStore craftingStore, int port)
+    public ManagementDashboardHost(GatewayHost gatewayHost, SessionRegistry sessionRegistry, ZoneSupervisor zoneSupervisor, GameplayDefinitionStore gameplayDefinitions, ModerationStore moderationStore, InventoryStore inventoryStore, CraftingStore craftingStore, CharacterProgressionStore progressionStore, int port)
     {
         _gatewayHost = gatewayHost;
         _sessionRegistry = sessionRegistry;
@@ -30,6 +31,7 @@ public sealed class ManagementDashboardHost
         _moderationStore = moderationStore;
         _inventoryStore = inventoryStore;
         _craftingStore = craftingStore;
+        _progressionStore = progressionStore;
         _port = port;
     }
 
@@ -232,12 +234,41 @@ public sealed class ManagementDashboardHost
                 }
 
                 var inventory = _inventoryStore.Craft(request.AccountId, recipe, request.OutputMaxStack <= 0 ? 200 : request.OutputMaxStack, request.Capacity <= 0 ? 40 : request.Capacity);
+                _progressionStore.GrantExperience(request.AccountId, "crafting", Math.Max(5, recipe.OutputQuantity * 5));
                 return Results.Json(new CraftingResultSnapshot(true, $"Crafted {recipe.OutputQuantity} {recipe.OutputItemId}.", request.AccountId, recipe.RecipeId, inventory));
             }
             catch (Exception ex)
             {
                 var snapshot = _inventoryStore.GetInventory(request.AccountId, request.Capacity <= 0 ? 40 : request.Capacity);
                 return Results.BadRequest(new CraftingResultSnapshot(false, ex.Message, request.AccountId, request.RecipeId, snapshot));
+            }
+        });
+        app.MapGet("/api/progression/{accountId}", (string accountId) =>
+        {
+            try
+            {
+                return Results.Json(_progressionStore.Get(accountId));
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+        });
+        app.MapPost("/api/progression/grant", async (HttpContext context) =>
+        {
+            var request = await JsonSerializer.DeserializeAsync<GrantProgressionRequest>(context.Request.Body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }, context.RequestAborted).ConfigureAwait(false);
+            if (request is null)
+            {
+                return Results.BadRequest(new { error = "Invalid request." });
+            }
+
+            try
+            {
+                return Results.Json(_progressionStore.GrantExperience(request.AccountId, request.TrackId, request.Experience));
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
             }
         });
         app.MapGet("/", async context =>
@@ -289,6 +320,11 @@ public sealed class ManagementDashboardHost
         {
             context.Response.ContentType = "text/html; charset=utf-8";
             await context.Response.WriteAsync(BuildCraftingPage(), cancellationToken);
+        });
+        app.MapGet("/tools/progression", async context =>
+        {
+            context.Response.ContentType = "text/html; charset=utf-8";
+            await context.Response.WriteAsync(BuildProgressionPage(), cancellationToken);
         });
         app.MapGet("/map", async context =>
         {
@@ -510,6 +546,7 @@ public sealed class ManagementDashboardHost
       <div class="badge"><a href="/tools/moderation" style="color:inherit;text-decoration:none;">Moderation Tool</a></div>
       <div class="badge"><a href="/tools/inventory" style="color:inherit;text-decoration:none;">Inventory Tool</a></div>
       <div class="badge"><a href="/tools/crafting" style="color:inherit;text-decoration:none;">Crafting Tool</a></div>
+      <div class="badge"><a href="/tools/progression" style="color:inherit;text-decoration:none;">Progression Tool</a></div>
       <h1>Live zone and session control surface.</h1>
       <div class="sub">
         This view reflects the in-process MMO runtime. It is intended for basic operations now: gateway health, online sessions, zone populations, and transfer activity.
@@ -589,6 +626,7 @@ public sealed class ManagementDashboardHost
           <li><a href="/tools/moderation">Moderation</a></li>
           <li><a href="/tools/inventory">Inventory</a></li>
           <li><a href="/tools/crafting">Crafting</a></li>
+          <li><a href="/tools/progression">Progression</a></li>
         </ul>
       </article>
     </section>
@@ -704,6 +742,7 @@ public sealed class ManagementDashboardHost
       <a class="tool" href="/tools/moderation"><strong>Moderation</strong><span class="muted">Runtime account actions: mute, ban, kick, history.</span></a>
       <a class="tool" href="/tools/inventory"><strong>Inventory</strong><span class="muted">Load accounts and perform add/move/split/remove operations.</span></a>
       <a class="tool" href="/tools/crafting"><strong>Crafting</strong><span class="muted">Manage recipes and execute crafts against account inventory.</span></a>
+      <a class="tool" href="/tools/progression"><strong>Progression</strong><span class="muted">Inspect and grant XP tracks (crafting, gathering, etc.).</span></a>
       <a class="tool" href="/map"><strong>Operations Map</strong><span class="muted">Visualize sessions, movement, and transfers.</span></a>
     </section>
   </div>
@@ -760,6 +799,7 @@ public sealed class ManagementDashboardHost
         <a class="btn" href="/tools/moderation">Moderation</a>
         <a class="btn" href="/tools/inventory">Inventory</a>
         <a class="btn" href="/tools/crafting">Crafting</a>
+        <a class="btn" href="/tools/progression">Progression</a>
       </div>
     </section>
     <section class="card">
@@ -1042,6 +1082,7 @@ public sealed class ManagementDashboardHost
     private sealed record InventorySplitRequest(string AccountId, int FromSlot, int ToSlot, int Quantity, int Capacity = 40);
     private sealed record InventoryRemoveRequest(string AccountId, int SlotIndex, int Quantity, int Capacity = 40);
     private sealed record CraftingExecuteRequest(string AccountId, string RecipeId, int OutputMaxStack = 200, int Capacity = 40);
+    private sealed record GrantProgressionRequest(string AccountId, string TrackId, int Experience);
 
     private string BuildInventoryPage()
     {
@@ -1074,6 +1115,7 @@ public sealed class ManagementDashboardHost
         <a class="btn" href="/tools">Tools Home</a>
         <a class="btn" href="/tools/moderation">Moderation</a>
         <a class="btn" href="/tools/crafting">Crafting</a>
+        <a class="btn" href="/tools/progression">Progression</a>
       </div>
       <p class="muted">Load an account inventory and perform add/move/split/remove operations persisted in SQLite.</p>
     </section>
@@ -1341,6 +1383,113 @@ public sealed class ManagementDashboardHost
     byId('saveRecipe').addEventListener('click', () => saveRecipe().catch(err => byId('status').textContent = err.message));
     byId('craftBtn').addEventListener('click', () => craft().catch(err => byId('status').textContent = err.message));
     loadRecipes();
+  </script>
+</body>
+</html>
+""";
+
+        return html;
+    }
+
+    private string BuildProgressionPage()
+    {
+        var html = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Progression Tools</title>
+  <style>
+    body { margin: 0; font-family: Georgia, "Palatino Linotype", serif; background: #f3ebdf; color: #26170f; }
+    .wrap { width: min(1000px, calc(100vw - 32px)); margin: 0 auto; padding: 24px 0 36px; display: grid; gap: 16px; }
+    .card { background: rgba(255,255,255,0.85); border: 1px solid rgba(61,43,31,0.14); border-radius: 18px; padding: 16px; }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    input { padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(61,43,31,0.2); min-width: 140px; }
+    button, a.btn { display: inline-flex; align-items: center; border-radius: 999px; border: 1px solid rgba(61,43,31,0.2); background: #fff; color: #26170f; padding: 8px 14px; text-decoration: none; cursor: pointer; }
+    table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.93rem; }
+    th, td { text-align: left; padding: 8px; border-bottom: 1px solid rgba(61,43,31,0.1); vertical-align: top; }
+    .muted { color: #6a5547; font-size: 0.92rem; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="card">
+      <h1>Progression Runtime Tools</h1>
+      <div class="row">
+        <a class="btn" href="/">Dashboard</a>
+        <a class="btn" href="/tools">Tools Home</a>
+      </div>
+      <p class="muted">Load progression tracks for an account and grant XP to simulate gameplay progression.</p>
+    </section>
+    <section class="card">
+      <div class="row">
+        <input id="accountId" placeholder="accountId" />
+        <button id="loadBtn">Load Progression</button>
+      </div>
+      <div class="row">
+        <input id="trackId" placeholder="trackId" value="crafting" />
+        <input id="xp" placeholder="xp" value="25" />
+        <button id="grantBtn">Grant XP</button>
+      </div>
+      <div id="status" class="muted">Idle</div>
+      <table>
+        <thead><tr><th>Track</th><th>Level</th><th>XP</th><th>To Next</th></tr></thead>
+        <tbody id="tracks"></tbody>
+      </table>
+    </section>
+  </div>
+  <script>
+    function byId(id) { return document.getElementById(id); }
+
+    function render(snapshot) {
+      byId('tracks').innerHTML = (snapshot.tracks || []).map(track => `
+        <tr>
+          <td>${track.trackId}</td>
+          <td>${track.level}</td>
+          <td>${track.experience}</td>
+          <td>${track.experienceToNextLevel}</td>
+        </tr>`).join('');
+    }
+
+    async function load() {
+      const accountId = byId('accountId').value.trim();
+      if (!accountId) {
+        byId('status').textContent = 'accountId is required.';
+        return;
+      }
+      const response = await fetch(`/api/progression/${encodeURIComponent(accountId)}`, { cache: 'no-store' });
+      const data = await response.json();
+      if (!response.ok) {
+        byId('status').textContent = data.error || 'Load failed.';
+        return;
+      }
+      render(data);
+      byId('status').textContent = `Loaded progression for ${accountId}`;
+    }
+
+    async function grant() {
+      const payload = {
+        accountId: byId('accountId').value.trim(),
+        trackId: byId('trackId').value.trim(),
+        experience: parseInt(byId('xp').value || '0', 10)
+      };
+      const response = await fetch('/api/progression/grant', {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify(payload)
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        byId('status').textContent = data.error || 'Grant failed.';
+        return;
+      }
+      render(data);
+      byId('status').textContent = `Granted XP to ${payload.trackId}`;
+    }
+
+    byId('loadBtn').addEventListener('click', () => load().catch(err => byId('status').textContent = err.message));
+    byId('grantBtn').addEventListener('click', () => grant().catch(err => byId('status').textContent = err.message));
   </script>
 </body>
 </html>
