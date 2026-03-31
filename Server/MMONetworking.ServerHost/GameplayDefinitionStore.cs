@@ -1,54 +1,86 @@
 using System;
+using System.Collections.Generic;
 using System.IO;
 using System.Linq;
 using System.Text.Json;
+using Microsoft.Data.Sqlite;
 using MMONetworking;
 
 namespace MMONetworking.ServerHost;
 
 public sealed class GameplayDefinitionStore
 {
-    private readonly string _filePath;
+    private readonly string _connectionString;
     private readonly object _sync = new();
-    private GameplayDefinitionsSnapshot _snapshot;
 
-    public GameplayDefinitionStore(string filePath, ZoneDirectory zoneDirectory)
+    public GameplayDefinitionStore(string databasePath, ZoneDirectory zoneDirectory)
     {
-        _filePath = filePath;
-        _snapshot = LoadOrCreate(filePath, zoneDirectory);
+        Directory.CreateDirectory(Path.GetDirectoryName(databasePath) ?? ".");
+        _connectionString = new SqliteConnectionStringBuilder { DataSource = databasePath }.ToString();
+        EnsureSchema();
+        SeedDefaultsIfEmpty(zoneDirectory);
     }
 
     public GameplayDefinitionsSnapshot GetSnapshot()
     {
         lock (_sync)
         {
-            return _snapshot;
+            using var connection = new SqliteConnection(_connectionString);
+            connection.Open();
+            return ReadSnapshot(connection);
         }
     }
 
     public GameplayDefinitionsSnapshot Update(GameplayDefinitionsSnapshot next)
     {
         Validate(next);
+
         lock (_sync)
         {
-            _snapshot = next;
-            Persist(_snapshot);
-            return _snapshot;
+            using var connection = new SqliteConnection(_connectionString);
+            connection.Open();
+            using var transaction = connection.BeginTransaction();
+            UpsertSection(connection, transaction, "items", next.Items);
+            UpsertSection(connection, transaction, "skills", next.Skills);
+            UpsertSection(connection, transaction, "resources", next.Resources);
+            UpsertSection(connection, transaction, "nodes", next.Nodes);
+            UpsertSection(connection, transaction, "zones", next.Zones);
+            transaction.Commit();
+            return ReadSnapshot(connection);
         }
     }
 
-    private static GameplayDefinitionsSnapshot LoadOrCreate(string filePath, ZoneDirectory zoneDirectory)
+    private void EnsureSchema()
     {
-        if (File.Exists(filePath))
+        using var connection = new SqliteConnection(_connectionString);
+        connection.Open();
+
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            """
+            CREATE TABLE IF NOT EXISTS gameplay_definitions (
+                section TEXT PRIMARY KEY,
+                payload_json TEXT NOT NULL,
+                updated_at_utc TEXT NOT NULL
+            );
+            """;
+        command.ExecuteNonQuery();
+    }
+
+    private void SeedDefaultsIfEmpty(ZoneDirectory zoneDirectory)
+    {
+        using var connection = new SqliteConnection(_connectionString);
+        connection.Open();
+
+        using var countCommand = connection.CreateCommand();
+        countCommand.CommandText = "SELECT COUNT(*) FROM gameplay_definitions;";
+        var count = Convert.ToInt32(countCommand.ExecuteScalar());
+        if (count > 0)
         {
-            var existing = JsonSerializer.Deserialize<GameplayDefinitionsSnapshot>(File.ReadAllText(filePath), JsonOptions);
-            if (existing is not null)
-            {
-                return existing;
-            }
+            return;
         }
 
-        var bootstrap = new GameplayDefinitionsSnapshot(
+        var defaults = new GameplayDefinitionsSnapshot(
             Items: new[]
             {
                 new ItemDefinitionSnapshot("log", "Wood Log", 200, 1.0f),
@@ -74,15 +106,53 @@ public sealed class GameplayDefinitionStore
                 .Select(zone => new ZoneDefinitionSnapshot(zone.ZoneId, zone.Name, zone.MinX, zone.MaxX, zone.MinZ, zone.MaxZ))
                 .ToArray());
 
-        Directory.CreateDirectory(Path.GetDirectoryName(filePath) ?? ".");
-        File.WriteAllText(filePath, JsonSerializer.Serialize(bootstrap, JsonOptions));
-        return bootstrap;
+        using var transaction = connection.BeginTransaction();
+        UpsertSection(connection, transaction, "items", defaults.Items);
+        UpsertSection(connection, transaction, "skills", defaults.Skills);
+        UpsertSection(connection, transaction, "resources", defaults.Resources);
+        UpsertSection(connection, transaction, "nodes", defaults.Nodes);
+        UpsertSection(connection, transaction, "zones", defaults.Zones);
+        transaction.Commit();
     }
 
-    private void Persist(GameplayDefinitionsSnapshot snapshot)
+    private GameplayDefinitionsSnapshot ReadSnapshot(SqliteConnection connection)
+        => new(
+            Items: ReadSection<ItemDefinitionSnapshot>(connection, "items"),
+            Skills: ReadSection<SkillDefinitionSnapshot>(connection, "skills"),
+            Resources: ReadSection<ResourceDefinitionSnapshot>(connection, "resources"),
+            Nodes: ReadSection<ResourceNodeDefinitionSnapshot>(connection, "nodes"),
+            Zones: ReadSection<ZoneDefinitionSnapshot>(connection, "zones"));
+
+    private static T[] ReadSection<T>(SqliteConnection connection, string section)
     {
-        Directory.CreateDirectory(Path.GetDirectoryName(_filePath) ?? ".");
-        File.WriteAllText(_filePath, JsonSerializer.Serialize(snapshot, JsonOptions));
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT payload_json FROM gameplay_definitions WHERE section = $section LIMIT 1;";
+        command.Parameters.AddWithValue("$section", section);
+        var payload = command.ExecuteScalar() as string;
+        if (string.IsNullOrWhiteSpace(payload))
+        {
+            return Array.Empty<T>();
+        }
+
+        return JsonSerializer.Deserialize<T[]>(payload, JsonOptions) ?? Array.Empty<T>();
+    }
+
+    private static void UpsertSection<T>(SqliteConnection connection, SqliteTransaction transaction, string section, IReadOnlyCollection<T> values)
+    {
+        using var command = connection.CreateCommand();
+        command.Transaction = transaction;
+        command.CommandText =
+            """
+            INSERT INTO gameplay_definitions(section, payload_json, updated_at_utc)
+            VALUES ($section, $payload, $updated)
+            ON CONFLICT(section) DO UPDATE SET
+                payload_json = excluded.payload_json,
+                updated_at_utc = excluded.updated_at_utc;
+            """;
+        command.Parameters.AddWithValue("$section", section);
+        command.Parameters.AddWithValue("$payload", JsonSerializer.Serialize(values, JsonOptions));
+        command.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
+        command.ExecuteNonQuery();
     }
 
     private static void Validate(GameplayDefinitionsSnapshot snapshot)

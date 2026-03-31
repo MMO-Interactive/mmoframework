@@ -105,3 +105,233 @@ public sealed record ZoneDefinitionSnapshot(
     float MaxX,
     float MinZ,
     float MaxZ);
+
+public sealed record ModerationSnapshot(
+    AccountModerationSnapshot[] Accounts,
+    ModerationActionSnapshot[] RecentActions);
+
+public sealed record AccountModerationSnapshot(
+    string AccountId,
+    bool IsMuted,
+    bool IsBanned,
+    string Reason,
+    string UpdatedBy,
+    DateTimeOffset UpdatedAtUtc);
+
+public sealed record ModerationActionSnapshot(
+    long Id,
+    string ActionType,
+    string AccountId,
+    Guid? SessionId,
+    ulong? PlayerId,
+    string Reason,
+    string Actor,
+    DateTimeOffset CreatedAtUtc);
+
+public sealed record InventorySnapshot(
+    string AccountId,
+    int Capacity,
+    InventorySlotSnapshot[] Slots);
+
+public sealed record InventorySlotSnapshot(
+    int SlotIndex,
+    string ItemId,
+    int Quantity);
+
+public sealed record CraftingIngredientSnapshot(
+    string ItemId,
+    int Quantity);
+
+public sealed record CraftingRecipeSnapshot(
+    string RecipeId,
+    string Name,
+    string OutputItemId,
+    int OutputQuantity,
+    int CraftSeconds,
+    CraftingIngredientSnapshot[] Ingredients);
+
+public sealed record CraftingResultSnapshot(
+    bool Success,
+    string Message,
+    string AccountId,
+    string RecipeId,
+    InventorySnapshot Inventory);
+
+public sealed record CharacterProgressionSnapshot(
+    string AccountId,
+    ProgressionTrackSnapshot[] Tracks);
+
+public sealed record ProgressionTrackSnapshot(
+    string TrackId,
+    int Level,
+    int Experience,
+    int ExperienceToNextLevel);
+
+public sealed record CombatantSnapshot(
+    string AccountId,
+    int HitPoints,
+    int MaxHitPoints,
+    int Stamina,
+    int Deaths);
+
+public sealed record CombatActionSnapshot(
+    long Id,
+    string ActionType,
+    string AttackerAccountId,
+    string TargetAccountId,
+    int Damage,
+    int RemainingHitPoints,
+    string Notes,
+    DateTimeOffset CreatedAtUtc);
+
+public sealed record CombatSnapshot(
+    CombatantSnapshot[] Combatants,
+    CombatActionSnapshot[] RecentActions);
+
+public sealed record FactionReputationSnapshot(
+    string FactionId,
+    int Points,
+    string Tier);
+
+public sealed record ReputationActionSnapshot(
+    long Id,
+    string FactionId,
+    int Amount,
+    string Reason,
+    string Actor,
+    DateTimeOffset CreatedAtUtc);
+
+public sealed record ReputationProfileSnapshot(
+    string AccountId,
+    FactionReputationSnapshot[] Factions,
+    ReputationActionSnapshot[] RecentActions);
+
+public sealed record QuestDefinitionSnapshot(
+    string QuestId,
+    string Title,
+    string Description,
+    string TargetAction,
+    int TargetCount,
+    int RewardExperience,
+    string RewardReputationFaction,
+    int RewardReputationAmount);
+
+public sealed record QuestProgressSnapshot(
+    string AccountId,
+    string QuestId,
+    int ProgressCount,
+    bool IsCompleted,
+    bool IsClaimed,
+    DateTimeOffset UpdatedAtUtc);
+
+public sealed record QuestBoardSnapshot(
+    string AccountId,
+    QuestDefinitionSnapshot[] Definitions,
+    QuestProgressSnapshot[] Progress,
+    QuestEventSnapshot[] RecentEvents);
+
+public sealed record QuestEventSnapshot(
+    long Id,
+    string AccountId,
+    string QuestId,
+    string EventType,
+    int Amount,
+    string Notes,
+    DateTimeOffset CreatedAtUtc);
+
+public sealed record QuestClaimSnapshot(
+    string AccountId,
+    string QuestId,
+    int AwardedExperience,
+    string AwardedReputationFaction,
+    int AwardedReputationAmount,
+    string Message);
+
+public sealed record WorldEventSnapshot(
+    string EventId,
+    string Title,
+    string Description,
+    string State,
+    DateTimeOffset StartsAtUtc,
+    DateTimeOffset EndsAtUtc,
+    int BaseRewardExperience,
+    string RewardReputationFaction,
+    int RewardReputationAmount,
+    DateTimeOffset CreatedAtUtc);
+
+public sealed record WorldEventParticipationSnapshot(
+    string EventId,
+    string AccountId,
+    int Contribution,
+    bool IsClaimed,
+    DateTimeOffset UpdatedAtUtc);
+
+public sealed record WorldEventBoardSnapshot(
+    string AccountId,
+    WorldEventSnapshot[] Events,
+    WorldEventParticipationSnapshot[] Participation,
+    WorldEventLogSnapshot[] RecentLogs);
+
+public sealed record WorldEventClaimSnapshot(
+    string EventId,
+    string AccountId,
+    int Contribution,
+    int AwardedExperience,
+    string AwardedReputationFaction,
+    int AwardedReputationAmount,
+    string Message);
+
+public sealed record WorldEventLeaderboardEntrySnapshot(
+    int Rank,
+    string AccountId,
+    int Contribution,
+    bool IsClaimed);
+
+public sealed record WorldEventLogSnapshot(
+    long Id,
+    string EventId,
+    string AccountId,
+    string ActionType,
+    string Details,
+    DateTimeOffset CreatedAtUtc);
+
+public sealed record InvasionSnapshot(
+    string InvasionId,
+    int ZoneId,
+    string MobTypeId,
+    int TotalWaves,
+    int CurrentWave,
+    string State,
+    int ThreatLevel,
+    DateTimeOffset StartsAtUtc,
+    DateTimeOffset EndsAtUtc);
+
+public sealed record InvasionContributionSnapshot(
+    string InvasionId,
+    string AccountId,
+    int Kills,
+    bool IsClaimed,
+    DateTimeOffset UpdatedAtUtc);
+
+public sealed record InvasionLogSnapshot(
+    long Id,
+    string InvasionId,
+    string AccountId,
+    string ActionType,
+    string Details,
+    DateTimeOffset CreatedAtUtc);
+
+public sealed record InvasionBoardSnapshot(
+    string AccountId,
+    InvasionSnapshot[] Invasions,
+    InvasionContributionSnapshot[] Contributions,
+    InvasionLogSnapshot[] RecentLogs);
+
+public sealed record InvasionClaimSnapshot(
+    string InvasionId,
+    string AccountId,
+    int Kills,
+    int AwardedExperience,
+    string AwardedReputationFaction,
+    int AwardedReputationAmount,
+    string Message);
