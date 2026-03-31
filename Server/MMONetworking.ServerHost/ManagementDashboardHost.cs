@@ -1,5 +1,6 @@
 using System;
 using System.Linq;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using Microsoft.AspNetCore.Builder;
@@ -14,13 +15,15 @@ public sealed class ManagementDashboardHost
     private readonly GatewayHost _gatewayHost;
     private readonly SessionRegistry _sessionRegistry;
     private readonly ZoneSupervisor _zoneSupervisor;
+    private readonly GameplayDefinitionStore _gameplayDefinitions;
     private readonly int _port;
 
-    public ManagementDashboardHost(GatewayHost gatewayHost, SessionRegistry sessionRegistry, ZoneSupervisor zoneSupervisor, int port)
+    public ManagementDashboardHost(GatewayHost gatewayHost, SessionRegistry sessionRegistry, ZoneSupervisor zoneSupervisor, GameplayDefinitionStore gameplayDefinitions, int port)
     {
         _gatewayHost = gatewayHost;
         _sessionRegistry = sessionRegistry;
         _zoneSupervisor = zoneSupervisor;
+        _gameplayDefinitions = gameplayDefinitions;
         _port = port;
     }
 
@@ -39,6 +42,29 @@ public sealed class ManagementDashboardHost
         var app = builder.Build();
 
         app.MapGet("/api/dashboard", () => Results.Json(CreateSnapshot()));
+        app.MapGet("/api/gameplay-definitions", () => Results.Json(_gameplayDefinitions.GetSnapshot()));
+        app.MapPut("/api/gameplay-definitions", async (HttpContext context) =>
+        {
+            try
+            {
+                var incoming = await JsonSerializer.DeserializeAsync<GameplayDefinitionsSnapshot>(
+                    context.Request.Body,
+                    new JsonSerializerOptions { PropertyNameCaseInsensitive = true },
+                    context.RequestAborted).ConfigureAwait(false);
+
+                if (incoming is null)
+                {
+                    return Results.BadRequest(new { error = "Request body was empty or invalid JSON." });
+                }
+
+                var saved = _gameplayDefinitions.Update(incoming);
+                return Results.Json(saved);
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+        });
         app.MapGet("/", async context =>
         {
             context.Response.ContentType = "text/html; charset=utf-8";
@@ -223,6 +249,27 @@ public sealed class ManagementDashboardHost
 
     .ok { color: var(--good); }
     .warn { color: var(--warn); }
+    .editor-toolbar { display: flex; gap: 10px; margin-top: 12px; flex-wrap: wrap; }
+    textarea {
+      width: 100%;
+      min-height: 280px;
+      border-radius: 12px;
+      border: 1px solid rgba(61,43,31,0.2);
+      background: rgba(255,255,255,0.8);
+      padding: 12px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace;
+      font-size: 0.86rem;
+      color: #26170f;
+      resize: vertical;
+    }
+    button {
+      border: 1px solid rgba(61,43,31,0.2);
+      background: rgba(255,255,255,0.92);
+      border-radius: 999px;
+      padding: 8px 14px;
+      color: #26170f;
+      cursor: pointer;
+    }
 
     @media (max-width: 920px) {
       .stat, .wide { grid-column: 1 / -1; }
@@ -300,6 +347,17 @@ public sealed class ManagementDashboardHost
           <tbody id="sessions"></tbody>
         </table>
       </article>
+
+      <article class="card full">
+        <div class="eyebrow">Gameplay Definitions</div>
+        <div class="sub">Define items, skills, resources, nodes, and zone metadata from one JSON payload. Saved to <code>Documents/GameplayDefinitions.json</code>.</div>
+        <textarea id="definitionsJson" spellcheck="false"></textarea>
+        <div class="editor-toolbar">
+          <button id="reloadDefinitions">Reload Definitions</button>
+          <button id="saveDefinitions">Save Definitions</button>
+          <div id="definitionStatus" class="badge">Not loaded</div>
+        </div>
+      </article>
     </section>
   </div>
 
@@ -368,7 +426,38 @@ public sealed class ManagementDashboardHost
       render(data);
     }
 
+    async function loadDefinitions() {
+      const response = await fetch('/api/gameplay-definitions', { cache: 'no-store' });
+      const data = await response.json();
+      document.getElementById('definitionsJson').value = JSON.stringify(data, null, 2);
+      document.getElementById('definitionStatus').textContent = `Definitions loaded ${new Date().toLocaleTimeString()}`;
+    }
+
+    async function saveDefinitions() {
+      const raw = document.getElementById('definitionsJson').value;
+      try {
+        const payload = JSON.parse(raw);
+        const response = await fetch('/api/gameplay-definitions', {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(payload)
+        });
+        const result = await response.json();
+        if (!response.ok) {
+          throw new Error(result.error || 'Failed to save definitions');
+        }
+        document.getElementById('definitionsJson').value = JSON.stringify(result, null, 2);
+        document.getElementById('definitionStatus').textContent = `Definitions saved ${new Date().toLocaleTimeString()}`;
+      } catch (err) {
+        document.getElementById('definitionStatus').textContent = `Save failed: ${err.message}`;
+      }
+    }
+
+    document.getElementById('reloadDefinitions').addEventListener('click', loadDefinitions);
+    document.getElementById('saveDefinitions').addEventListener('click', saveDefinitions);
+
     refresh();
+    loadDefinitions();
     setInterval(refresh, 1500);
   </script>
 </body>

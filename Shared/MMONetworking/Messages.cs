@@ -18,7 +18,9 @@ public enum TcpMessageKind : ushort
     ZoneTransferRequest = 103,
     ZoneTransferResponse = 104,
     ZonePrewarmRequest = 105,
-    ZonePrewarmResponse = 106
+    ZonePrewarmResponse = 106,
+    GameplayCommand = 200,
+    GameplayResult = 201
 }
 
 public enum UdpMessageKind : ushort
@@ -104,6 +106,29 @@ public sealed record ZonePrewarmRequestMessage(Guid SessionId, int ZoneId, Netwo
 
 public sealed record ZonePrewarmResponseMessage(bool Started, Guid SessionId, int ZoneId, int DestinationZoneId, string ErrorText)
     : TcpMessage(TcpMessageKind.ZonePrewarmResponse);
+
+public enum GameplayCommandKind : byte
+{
+    Gather = 1,
+    InspectInventory = 2
+}
+
+public sealed record GameplayCommandMessage(
+    Guid SessionId,
+    uint CommandId,
+    GameplayCommandKind CommandKind,
+    string TargetId)
+    : TcpMessage(TcpMessageKind.GameplayCommand);
+
+public sealed record GameplayResultMessage(
+    Guid SessionId,
+    uint CommandId,
+    bool Success,
+    string Text,
+    string ItemId,
+    int ItemCount,
+    int SkillValue)
+    : TcpMessage(TcpMessageKind.GameplayResult);
 
 public sealed record ClientInputMessage(Guid SessionId, uint Sequence, NetworkVector3 Move, float DeltaTimeSeconds)
     : UdpMessage(UdpMessageKind.ClientInput);
