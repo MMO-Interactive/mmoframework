@@ -1,4 +1,5 @@
 using System;
+using System.Collections.Generic;
 using System.Collections.Concurrent;
 using System.IO;
 using System.Linq;
@@ -18,11 +19,16 @@ public sealed class ZoneHost : IDisposable
     private readonly GhostRegistry _ghostRegistry;
     private readonly ZoneRuntimeSettings _settings;
     private readonly Func<int, CancellationToken, Task> _ensureZoneRunningAsync;
+    private readonly ConcurrentDictionary<string, ZoneMob> _mobs;
+    private readonly ZoneResourceNode[] _resourceNodes;
     private readonly TcpListener _tcpListener;
     private readonly UdpClient _udpClient;
     private readonly ConcurrentDictionary<Guid, ZonePlayer> _players = new();
     private readonly TaskCompletionSource<bool> _tcpReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly TaskCompletionSource<bool> _udpReady = new(TaskCreationOptions.RunContinuationsAsynchronously);
+    private readonly float _aoiRadiusSquared;
+    private readonly float _spatialCellSize;
+    private readonly SpatialIndex<ZoneResourceNode> _resourceNodeIndex;
     private uint _tick;
     private long _totalTransfersInitiated;
 
@@ -40,6 +46,11 @@ public sealed class ZoneHost : IDisposable
         _ghostRegistry = ghostRegistry;
         _settings = settings;
         _ensureZoneRunningAsync = ensureZoneRunningAsync;
+        _mobs = CreateDefaultMobs(definition, settings.GetMobCountForZone(definition.ZoneId));
+        _resourceNodes = CreateDefaultResourceNodes(definition);
+        _aoiRadiusSquared = settings.AoiRadius * settings.AoiRadius;
+        _spatialCellSize = MathF.Max(settings.AoiRadius, 1f);
+        _resourceNodeIndex = SpatialIndex<ZoneResourceNode>.Build(_resourceNodes, _spatialCellSize, static node => node.Position);
         _tcpListener = new TcpListener(IPAddress.Any, definition.TcpPort);
         _udpClient = new UdpClient(definition.UdpPort);
     }
@@ -89,6 +100,19 @@ public sealed class ZoneHost : IDisposable
                     player.Velocity.Y,
                     player.Velocity.Z,
                     player.PendingDestinationZoneId))
+                .ToArray(),
+            _mobs.Values
+                .OrderBy(mob => mob.MobId)
+                .Select(mob => new ZoneMobSnapshot(
+                    mob.MobId,
+                    mob.MobTypeId,
+                    mob.Position.X,
+                    mob.Position.Y,
+                    mob.Position.Z,
+                    mob.Velocity.X,
+                    mob.Velocity.Y,
+                    mob.Velocity.Z,
+                    mob.State))
                 .ToArray());
     }
 
@@ -153,6 +177,7 @@ public sealed class ZoneHost : IDisposable
 
                 player.ControlConnection = new ZoneControlConnection(stream);
                 _sessionRegistry.SetCurrentZone(attach.SessionId, _definition.ZoneId, player.Position);
+                _sessionRegistry.TouchTcp(attach.SessionId);
                 Console.WriteLine($"Zone {_definition.ZoneId} TCP attach accepted for session {attach.SessionId}, player {player.PlayerId}, spawn {player.Position.X:F2},{player.Position.Z:F2}.");
 
                 await player.ControlConnection.SendAsync(
@@ -171,8 +196,10 @@ public sealed class ZoneHost : IDisposable
                 while (!cancellationToken.IsCancellationRequested)
                 {
                     var message = await WireProtocol.ReadTcpMessageAsync(stream, cancellationToken).ConfigureAwait(false);
-                    if (message is HeartbeatMessage)
+                    if (message is HeartbeatMessage heartbeat)
                     {
+                        _sessionRegistry.TouchTcp(attach.SessionId);
+                        await player.ControlConnection.SendAsync(new HeartbeatMessage(heartbeat.ServerTicks), cancellationToken).ConfigureAwait(false);
                         continue;
                     }
                 }
@@ -217,11 +244,22 @@ public sealed class ZoneHost : IDisposable
                     case ClientInputMessage input:
                     if (_players.TryGetValue(input.SessionId, out var player))
                     {
+                        if (input.Sequence <= player.LastAcceptedInputSequence)
+                        {
+                            if (input.Sequence % 20 == 0)
+                            {
+                                Console.WriteLine($"Zone {_definition.ZoneId} rejected out-of-order input seq {input.Sequence} for session {input.SessionId}; last accepted {player.LastAcceptedInputSequence}.");
+                            }
+                            break;
+                        }
+
+                        player.LastAcceptedInputSequence = input.Sequence;
                         player.RemoteEndpoint = result.RemoteEndPoint;
                         player.Velocity = input.Move * 6f;
                         player.Position += player.Velocity * Math.Clamp(input.DeltaTimeSeconds, 0f, 0.1f);
                         player.Position = new NetworkVector3(player.Position.X, 0f, player.Position.Z);
                         _sessionRegistry.SetCurrentZone(player.SessionId, _definition.ZoneId, player.Position);
+                        _sessionRegistry.TouchUdp(player.SessionId);
                         if (input.Sequence % 20 == 0)
                         {
                             Console.WriteLine($"Zone {_definition.ZoneId} UDP input seq {input.Sequence} for session {input.SessionId} from {result.RemoteEndPoint}, pos {player.Position.X:F2},{player.Position.Z:F2}.");
@@ -238,6 +276,7 @@ public sealed class ZoneHost : IDisposable
                     {
                         existingPlayer.RemoteEndpoint = result.RemoteEndPoint;
                         _sessionRegistry.SetCurrentZone(probe.SessionId, _definition.ZoneId, existingPlayer.Position);
+                        _sessionRegistry.TouchUdp(probe.SessionId);
                         Console.WriteLine($"Zone {_definition.ZoneId} UDP probe rebound existing session {probe.SessionId} to {result.RemoteEndPoint}.");
                         var existingAck = WireProtocol.SerializeUdpMessage(new TransferReadyMessage(probe.SessionId, _definition.ZoneId));
                         await _udpClient.SendAsync(existingAck, existingAck.Length, result.RemoteEndPoint).ConfigureAwait(false);
@@ -257,6 +296,7 @@ public sealed class ZoneHost : IDisposable
 
                         transferPlayer.RemoteEndpoint = result.RemoteEndPoint;
                         _sessionRegistry.SetCurrentZone(probe.SessionId, _definition.ZoneId, transferPlayer.Position);
+                        _sessionRegistry.TouchUdp(probe.SessionId);
                         Console.WriteLine($"Zone {_definition.ZoneId} UDP probe created session {probe.SessionId} at endpoint {result.RemoteEndPoint}.");
                         var ack = WireProtocol.SerializeUdpMessage(new TransferReadyMessage(probe.SessionId, _definition.ZoneId));
                         await _udpClient.SendAsync(ack, ack.Length, result.RemoteEndPoint).ConfigureAwait(false);
@@ -286,6 +326,7 @@ public sealed class ZoneHost : IDisposable
             while (await timer.WaitForNextTickAsync(cancellationToken).ConfigureAwait(false))
             {
                 _tick++;
+                UpdateMobs(0.05f);
                 var playerList = _players.Values.ToArray();
                 foreach (var entry in playerList)
                 {
@@ -295,6 +336,10 @@ public sealed class ZoneHost : IDisposable
 
                 var nowUtc = DateTimeOffset.UtcNow;
                 var ghostSnapshots = _ghostRegistry.GetActiveGhosts(_definition.ZoneId, nowUtc);
+                var playerIndex = SpatialIndex<ZonePlayer>.Build(playerList, _spatialCellSize, static player => player.Position);
+                var ghostIndex = SpatialIndex<GhostRegistry.GhostReplica>.Build(ghostSnapshots, _spatialCellSize, static ghost => ghost.Position);
+                var mobList = _mobs.Values.ToArray();
+                var mobIndex = SpatialIndex<ZoneMob>.Build(mobList, _spatialCellSize, static mob => mob.Position);
                 foreach (var player in playerList)
                 {
                     if (player.RemoteEndpoint is null)
@@ -302,7 +347,7 @@ public sealed class ZoneHost : IDisposable
                         continue;
                     }
 
-                    var snapshot = BuildSnapshotForPlayer(player, playerList, ghostSnapshots);
+                    var snapshot = BuildSnapshotForPlayer(player, playerIndex, ghostIndex, mobIndex);
                     var payload = WireProtocol.SerializeUdpMessage(snapshot);
                     await _udpClient.SendAsync(payload, payload.Length, player.RemoteEndpoint).ConfigureAwait(false);
                 }
@@ -310,6 +355,33 @@ public sealed class ZoneHost : IDisposable
                 foreach (var stalePlayer in playerList.Where(player => !_sessionRegistry.TryGet(player.SessionId, out var session) || session!.CurrentZoneId != _definition.ZoneId).ToArray())
                 {
                     _players.TryRemove(stalePlayer.SessionId, out _);
+                }
+
+                foreach (var timedOutPlayer in playerList.Where(player => _sessionRegistry.IsTimedOut(player.SessionId, _settings.SessionTimeout)).ToArray())
+                {
+                    if (_sessionRegistry.BeginDisconnectGrace(timedOutPlayer.SessionId, _settings.ReconnectGracePeriod, out var deadlineUtc))
+                    {
+                        Console.WriteLine($"Zone {_definition.ZoneId} session {timedOutPlayer.SessionId} for player {timedOutPlayer.PlayerId} entered reconnect grace until {deadlineUtc:O}.");
+                        if (timedOutPlayer.ControlConnection is not null)
+                        {
+                            try
+                            {
+                                await timedOutPlayer.ControlConnection.SendAsync(
+                                    new DisconnectNoticeMessage("Connection stalled. Waiting for reconnect grace.", true, (int)_settings.ReconnectGracePeriod.TotalSeconds),
+                                    cancellationToken).ConfigureAwait(false);
+                            }
+                            catch
+                            {
+                            }
+                        }
+                    }
+                }
+
+                foreach (var expiredGracePlayer in playerList.Where(player => _sessionRegistry.IsGraceExpired(player.SessionId, out _)).ToArray())
+                {
+                    Console.WriteLine($"Zone {_definition.ZoneId} finalizing disconnect for session {expiredGracePlayer.SessionId} after reconnect grace expired.");
+                    _players.TryRemove(expiredGracePlayer.SessionId, out _);
+                    _sessionRegistry.TryRemove(expiredGracePlayer.SessionId, out _);
                 }
             }
         }
@@ -405,42 +477,194 @@ public sealed class ZoneHost : IDisposable
         return spawn;
     }
 
-    private WorldSnapshotMessage BuildSnapshotForPlayer(ZonePlayer recipient, ZonePlayer[] playerList, GhostRegistry.GhostReplica[] ghostReplicas)
+    private WorldSnapshotMessage BuildSnapshotForPlayer(
+        ZonePlayer recipient,
+        SpatialIndex<ZonePlayer> playerIndex,
+        SpatialIndex<GhostRegistry.GhostReplica> ghostIndex,
+        SpatialIndex<ZoneMob> mobIndex)
     {
-        var visiblePlayers = playerList
-            .Where(player => player.SessionId == recipient.SessionId || IsWithinAoi(recipient.Position, player.Position))
-            .Select(player => new PlayerSnapshot(
+        var playerSnapshots = new List<PlayerSnapshot>(8);
+        foreach (var player in playerIndex.EnumerateNearby(recipient.Position))
+        {
+            if (player.SessionId != recipient.SessionId && !IsWithinAoi(recipient.Position, player.Position))
+            {
+                continue;
+            }
+
+            playerSnapshots.Add(new PlayerSnapshot(
                 player.PlayerId,
                 player.Position,
                 player.Velocity,
                 SnapshotEntityKind.Player,
                 _definition.ZoneId));
+        }
 
-        var visibleGhosts = ghostReplicas
-            .Where(ghost => ghost.SessionId != recipient.SessionId)
-            .Where(ghost => !_players.ContainsKey(ghost.SessionId))
-            .Where(ghost => IsWithinAoi(recipient.Position, ghost.Position))
-            .Select(ghost => new PlayerSnapshot(
+        foreach (var ghost in ghostIndex.EnumerateNearby(recipient.Position))
+        {
+            if (ghost.SessionId == recipient.SessionId || _players.ContainsKey(ghost.SessionId) || !IsWithinAoi(recipient.Position, ghost.Position))
+            {
+                continue;
+            }
+
+            playerSnapshots.Add(new PlayerSnapshot(
                 ghost.PlayerId,
                 ghost.Position,
                 ghost.Velocity,
                 SnapshotEntityKind.Ghost,
                 ghost.SourceZoneId));
+        }
+
+        playerSnapshots.Sort(static (left, right) => left.PlayerId.CompareTo(right.PlayerId));
+
+        var visibleNodes = new List<ResourceNodeSnapshot>(4);
+        foreach (var node in _resourceNodeIndex.EnumerateNearby(recipient.Position))
+        {
+            if (!IsWithinAoi(recipient.Position, node.Position))
+            {
+                continue;
+            }
+
+            visibleNodes.Add(new ResourceNodeSnapshot(
+                node.NodeId,
+                node.ResourceId,
+                node.Position,
+                node.Remaining,
+                node.MaxAmount));
+        }
+
+        var visibleMobs = new List<MobSnapshot>(6);
+        foreach (var mob in mobIndex.EnumerateNearby(recipient.Position))
+        {
+            if (!IsWithinAoi(recipient.Position, mob.Position))
+            {
+                continue;
+            }
+
+            visibleMobs.Add(new MobSnapshot(
+                mob.MobId,
+                mob.MobTypeId,
+                mob.Position,
+                mob.Velocity,
+                mob.State));
+        }
+
+        visibleMobs.Sort(static (left, right) => string.CompareOrdinal(left.MobId, right.MobId));
 
         return new WorldSnapshotMessage(
             _definition.ZoneId,
             _tick,
-            visiblePlayers
-                .Concat(visibleGhosts)
-                .OrderBy(snapshot => snapshot.PlayerId)
-                .ToArray());
+            playerSnapshots.ToArray(),
+            visibleNodes.ToArray(),
+            visibleMobs.ToArray());
     }
 
     private bool IsWithinAoi(NetworkVector3 origin, NetworkVector3 target)
     {
         var dx = origin.X - target.X;
         var dz = origin.Z - target.Z;
-        return (dx * dx) + (dz * dz) <= _settings.AoiRadius * _settings.AoiRadius;
+        return (dx * dx) + (dz * dz) <= _aoiRadiusSquared;
+    }
+
+    private void UpdateMobs(float deltaSeconds)
+    {
+        var nowUtc = DateTimeOffset.UtcNow;
+        foreach (var mob in _mobs.Values)
+        {
+            var toTargetX = mob.TargetPosition.X - mob.Position.X;
+            var toTargetZ = mob.TargetPosition.Z - mob.Position.Z;
+            var distanceSq = (toTargetX * toTargetX) + (toTargetZ * toTargetZ);
+
+            if (distanceSq <= 0.25f)
+            {
+                mob.Position = new NetworkVector3(mob.TargetPosition.X, 0f, mob.TargetPosition.Z);
+                mob.Velocity = NetworkVector3.Zero;
+
+                if (nowUtc >= mob.NextDecisionUtc)
+                {
+                    mob.TargetPosition = ChooseMobTarget(mob);
+                    mob.NextDecisionUtc = nowUtc.AddSeconds(Random.Shared.NextDouble() * 3.0 + 2.0);
+                    mob.State = "Wandering";
+                }
+                else
+                {
+                    mob.State = "Idle";
+                }
+
+                continue;
+            }
+
+            var distance = MathF.Sqrt(distanceSq);
+            var step = MathF.Min(distance, mob.Speed * deltaSeconds);
+            var nx = toTargetX / MathF.Max(distance, 0.0001f);
+            var nz = toTargetZ / MathF.Max(distance, 0.0001f);
+            mob.Velocity = new NetworkVector3(nx * mob.Speed, 0f, nz * mob.Speed);
+            mob.Position = new NetworkVector3(
+                mob.Position.X + nx * step,
+                0f,
+                mob.Position.Z + nz * step);
+            mob.State = "Wandering";
+        }
+    }
+
+    private NetworkVector3 ChooseMobTarget(ZoneMob mob)
+    {
+        var radius = mob.WanderRadius;
+        var x = mob.SpawnPosition.X + (float)((Random.Shared.NextDouble() * 2.0 - 1.0) * radius);
+        var z = mob.SpawnPosition.Z + (float)((Random.Shared.NextDouble() * 2.0 - 1.0) * radius);
+        return _definition.Clamp(new NetworkVector3(x, 0f, z));
+    }
+
+    private static ConcurrentDictionary<string, ZoneMob> CreateDefaultMobs(ZoneDefinition definition, int mobCount)
+    {
+        var mobs = new ConcurrentDictionary<string, ZoneMob>();
+        if (mobCount <= 0)
+        {
+            return mobs;
+        }
+
+        var width = MathF.Max(definition.MaxX - definition.MinX - 12f, 1f);
+        var depth = MathF.Max(definition.MaxZ - definition.MinZ - 12f, 1f);
+        var columns = Math.Max(1, (int)MathF.Ceiling(MathF.Sqrt(mobCount)));
+        var rows = Math.Max(1, (int)MathF.Ceiling(mobCount / (float)columns));
+        var spacingX = width / columns;
+        var spacingZ = depth / rows;
+
+        for (var index = 0; index < mobCount; index++)
+        {
+            var column = index % columns;
+            var row = index / columns;
+            var mobTypeId = index % 2 == 0 ? "wolf" : "boar";
+            var speed = mobTypeId == "wolf" ? 1.6f : 1.25f;
+            var wanderRadius = mobTypeId == "wolf" ? 10f : 8f;
+            var spawn = new NetworkVector3(
+                definition.MinX + 6f + (column * spacingX) + (spacingX * 0.5f),
+                0f,
+                definition.MinZ + 6f + (row * spacingZ) + (spacingZ * 0.5f));
+            var mobId = mobTypeId + "-" + definition.ZoneId + "-" + (index + 1);
+            mobs[mobId] = new ZoneMob(mobId, mobTypeId, definition.Clamp(spawn), speed, wanderRadius);
+        }
+
+        return mobs;
+    }
+
+    private static ZoneResourceNode[] CreateDefaultResourceNodes(ZoneDefinition definition)
+    {
+        var midZ = (definition.MinZ + definition.MaxZ) * 0.5f;
+        return new[]
+        {
+            new ZoneResourceNode(
+                "tree-1",
+                "log",
+                new NetworkVector3(definition.MinX + 8f, 0f, midZ - 6f),
+                remaining: 6,
+                maxAmount: 6),
+            new ZoneResourceNode(
+                "ore-1",
+                "ore",
+                new NetworkVector3(definition.MinX + 14f, 0f, midZ + 6f),
+                remaining: 5,
+                maxAmount: 5)
+        };
     }
 
     private sealed class ZonePlayer
@@ -459,6 +683,7 @@ public sealed class ZoneHost : IDisposable
         public IPEndPoint? RemoteEndpoint { get; set; }
         public Guid? PendingTransferId { get; set; }
         public Guid? LastIssuedTransferId { get; set; }
+        public uint LastAcceptedInputSequence { get; set; }
         public int? PendingDestinationZoneId { get; set; }
         public ZoneControlConnection? ControlConnection { get; set; }
     }
@@ -483,6 +708,107 @@ public sealed class ZoneHost : IDisposable
             finally
             {
                 _writeLock.Release();
+            }
+        }
+    }
+
+    private sealed class ZoneMob
+    {
+        public ZoneMob(string mobId, string mobTypeId, NetworkVector3 spawnPosition, float speed, float wanderRadius)
+        {
+            MobId = mobId;
+            MobTypeId = mobTypeId;
+            SpawnPosition = spawnPosition;
+            Position = spawnPosition;
+            TargetPosition = spawnPosition;
+            Speed = speed;
+            WanderRadius = wanderRadius;
+            State = "Idle";
+            NextDecisionUtc = DateTimeOffset.UtcNow.AddSeconds(Random.Shared.NextDouble() * 2.0 + 1.0);
+        }
+
+        public string MobId { get; }
+        public string MobTypeId { get; }
+        public NetworkVector3 SpawnPosition { get; }
+        public NetworkVector3 Position { get; set; }
+        public NetworkVector3 Velocity { get; set; }
+        public NetworkVector3 TargetPosition { get; set; }
+        public DateTimeOffset NextDecisionUtc { get; set; }
+        public float Speed { get; }
+        public float WanderRadius { get; }
+        public string State { get; set; }
+    }
+
+    private sealed class ZoneResourceNode
+    {
+        public ZoneResourceNode(string nodeId, string resourceId, NetworkVector3 position, int remaining, int maxAmount)
+        {
+            NodeId = nodeId;
+            ResourceId = resourceId;
+            Position = position;
+            Remaining = remaining;
+            MaxAmount = maxAmount;
+        }
+
+        public string NodeId { get; }
+        public string ResourceId { get; }
+        public NetworkVector3 Position { get; }
+        public int Remaining { get; }
+        public int MaxAmount { get; }
+    }
+
+    private readonly record struct CellKey(int X, int Z);
+
+    private sealed class SpatialIndex<T>
+    {
+        private readonly Dictionary<CellKey, List<T>> _buckets;
+        private readonly float _cellSize;
+
+        private SpatialIndex(Dictionary<CellKey, List<T>> buckets, float cellSize)
+        {
+            _buckets = buckets;
+            _cellSize = cellSize;
+        }
+
+        public static SpatialIndex<T> Build(IEnumerable<T> items, float cellSize, Func<T, NetworkVector3> positionSelector)
+        {
+            var buckets = new Dictionary<CellKey, List<T>>();
+            foreach (var item in items)
+            {
+                var position = positionSelector(item);
+                var key = new CellKey(
+                    (int)MathF.Floor(position.X / cellSize),
+                    (int)MathF.Floor(position.Z / cellSize));
+
+                if (!buckets.TryGetValue(key, out var bucket))
+                {
+                    bucket = new List<T>();
+                    buckets.Add(key, bucket);
+                }
+
+                bucket.Add(item);
+            }
+
+            return new SpatialIndex<T>(buckets, cellSize);
+        }
+
+        public IEnumerable<T> EnumerateNearby(NetworkVector3 origin)
+        {
+            var cellX = (int)MathF.Floor(origin.X / _cellSize);
+            var cellZ = (int)MathF.Floor(origin.Z / _cellSize);
+
+            for (var dz = -1; dz <= 1; dz++)
+            {
+                for (var dx = -1; dx <= 1; dx++)
+                {
+                    if (_buckets.TryGetValue(new CellKey(cellX + dx, cellZ + dz), out var bucket))
+                    {
+                        foreach (var item in bucket)
+                        {
+                            yield return item;
+                        }
+                    }
+                }
             }
         }
     }

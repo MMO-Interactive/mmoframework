@@ -17,6 +17,8 @@ public static class UnityMmoClientSceneBootstrap
         var client = root.AddComponent<UnityMmoClient>();
         root.AddComponent<UnityMmoClientStatusView>();
         root.AddComponent<UnityMmoRemoteAvatarSystem>();
+        root.AddComponent<UnityMmoResourceNodeSystem>();
+        root.AddComponent<UnityMmoMobSystem>();
 
         var floor = GameObject.CreatePrimitive(PrimitiveType.Plane);
         floor.name = "Arena Floor";

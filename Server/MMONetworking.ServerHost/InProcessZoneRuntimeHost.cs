@@ -34,6 +34,10 @@ public sealed class InProcessZoneRuntimeHost : IZoneRuntimeHost
     {
     }
 
+    public void ReportMobStates(MobSnapshot[] mobs)
+    {
+    }
+
     public void RemovePlayer(Guid sessionId)
     {
     }

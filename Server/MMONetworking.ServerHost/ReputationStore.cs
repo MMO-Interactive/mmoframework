@@ -15,26 +15,26 @@ public sealed class ReputationStore
         EnsureSchema();
     }
 
-    public ReputationProfileSnapshot GetProfile(string accountId, int actionLimit = 120)
+    public ReputationProfileSnapshot GetProfile(ulong characterId, int actionLimit = 120)
     {
-        if (string.IsNullOrWhiteSpace(accountId))
+        if (characterId == 0)
         {
-            throw new InvalidOperationException("accountId is required.");
+            throw new InvalidOperationException("characterId is required.");
         }
 
         lock (_sync)
         {
             using var connection = new SqliteConnection(_connectionString);
             connection.Open();
-            return LoadProfile(connection, accountId.Trim(), actionLimit);
+            return LoadProfile(connection, characterId, actionLimit);
         }
     }
 
-    public ReputationProfileSnapshot Award(string accountId, string factionId, int amount, string reason, string actor)
+    public ReputationProfileSnapshot Award(ulong characterId, string factionId, int amount, string reason, string actor)
     {
-        if (string.IsNullOrWhiteSpace(accountId))
+        if (characterId == 0)
         {
-            throw new InvalidOperationException("accountId is required.");
+            throw new InvalidOperationException("characterId is required.");
         }
 
         if (string.IsNullOrWhiteSpace(factionId))
@@ -58,13 +58,13 @@ public sealed class ReputationStore
                 command.Transaction = tx;
                 command.CommandText =
                     """
-                    INSERT INTO reputation_state(account_id, faction_id, points, updated_at_utc)
-                    VALUES ($account, $faction, $amount, $updated)
-                    ON CONFLICT(account_id, faction_id) DO UPDATE SET
+                    INSERT INTO reputation_state(character_id, faction_id, points, updated_at_utc)
+                    VALUES ($character, $faction, $amount, $updated)
+                    ON CONFLICT(character_id, faction_id) DO UPDATE SET
                         points = points + excluded.points,
                         updated_at_utc = excluded.updated_at_utc;
                     """;
-                command.Parameters.AddWithValue("$account", accountId.Trim());
+                command.Parameters.AddWithValue("$character", unchecked((long)characterId));
                 command.Parameters.AddWithValue("$faction", factionId.Trim());
                 command.Parameters.AddWithValue("$amount", amount);
                 command.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
@@ -76,10 +76,10 @@ public sealed class ReputationStore
                 command.Transaction = tx;
                 command.CommandText =
                     """
-                    INSERT INTO reputation_actions(account_id, faction_id, amount, reason, actor, created_at_utc)
-                    VALUES ($account, $faction, $amount, $reason, $actor, $created);
+                    INSERT INTO reputation_actions(character_id, faction_id, amount, reason, actor, created_at_utc)
+                    VALUES ($character, $faction, $amount, $reason, $actor, $created);
                     """;
-                command.Parameters.AddWithValue("$account", accountId.Trim());
+                command.Parameters.AddWithValue("$character", unchecked((long)characterId));
                 command.Parameters.AddWithValue("$faction", factionId.Trim());
                 command.Parameters.AddWithValue("$amount", amount);
                 command.Parameters.AddWithValue("$reason", reason);
@@ -89,11 +89,11 @@ public sealed class ReputationStore
             }
 
             tx.Commit();
-            return LoadProfile(connection, accountId.Trim(), 120);
+            return LoadProfile(connection, characterId, 120);
         }
     }
 
-    private static ReputationProfileSnapshot LoadProfile(SqliteConnection connection, string accountId, int actionLimit)
+    private static ReputationProfileSnapshot LoadProfile(SqliteConnection connection, ulong characterId, int actionLimit)
     {
         var factions = new List<FactionReputationSnapshot>();
         using (var command = connection.CreateCommand())
@@ -102,10 +102,10 @@ public sealed class ReputationStore
                 """
                 SELECT faction_id, points
                 FROM reputation_state
-                WHERE account_id = $account
+                WHERE character_id = $character
                 ORDER BY points DESC, faction_id ASC;
                 """;
-            command.Parameters.AddWithValue("$account", accountId);
+            command.Parameters.AddWithValue("$character", unchecked((long)characterId));
             using var reader = command.ExecuteReader();
             while (reader.Read())
             {
@@ -124,11 +124,11 @@ public sealed class ReputationStore
                 """
                 SELECT id, faction_id, amount, reason, actor, created_at_utc
                 FROM reputation_actions
-                WHERE account_id = $account
+                WHERE character_id = $character
                 ORDER BY id DESC
                 LIMIT $limit;
                 """;
-            command.Parameters.AddWithValue("$account", accountId);
+            command.Parameters.AddWithValue("$character", unchecked((long)characterId));
             command.Parameters.AddWithValue("$limit", actionLimit);
             using var reader = command.ExecuteReader();
             while (reader.Read())
@@ -143,7 +143,7 @@ public sealed class ReputationStore
             }
         }
 
-        return new ReputationProfileSnapshot(accountId, factions.ToArray(), actions.ToArray());
+        return new ReputationProfileSnapshot(characterId, factions.ToArray(), actions.ToArray());
     }
 
     private static string ComputeTier(int points)
@@ -168,6 +168,7 @@ public sealed class ReputationStore
                 """
                 CREATE TABLE IF NOT EXISTS reputation_state (
                     account_id TEXT NOT NULL,
+                    character_id INTEGER NULL,
                     faction_id TEXT NOT NULL,
                     points INTEGER NOT NULL,
                     updated_at_utc TEXT NOT NULL,
@@ -184,6 +185,7 @@ public sealed class ReputationStore
                 CREATE TABLE IF NOT EXISTS reputation_actions (
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     account_id TEXT NOT NULL,
+                    character_id INTEGER NULL,
                     faction_id TEXT NOT NULL,
                     amount INTEGER NOT NULL,
                     reason TEXT NOT NULL,
@@ -192,6 +194,42 @@ public sealed class ReputationStore
                 );
                 """;
             command.ExecuteNonQuery();
+        }
+
+        using (var migrateState = connection.CreateCommand())
+        {
+            migrateState.CommandText =
+                """
+                UPDATE reputation_state
+                SET character_id = (
+                    SELECT primary_character_id
+                    FROM accounts
+                    WHERE accounts.account_id = reputation_state.account_id
+                )
+                WHERE character_id IS NULL;
+                """;
+            migrateState.ExecuteNonQuery();
+        }
+
+        using (var migrateActions = connection.CreateCommand())
+        {
+            migrateActions.CommandText =
+                """
+                UPDATE reputation_actions
+                SET character_id = (
+                    SELECT primary_character_id
+                    FROM accounts
+                    WHERE accounts.account_id = reputation_actions.account_id
+                )
+                WHERE character_id IS NULL;
+                """;
+            migrateActions.ExecuteNonQuery();
+        }
+
+        using (var stateIndex = connection.CreateCommand())
+        {
+            stateIndex.CommandText = "CREATE UNIQUE INDEX IF NOT EXISTS ix_reputation_state_character_faction ON reputation_state(character_id, faction_id);";
+            stateIndex.ExecuteNonQuery();
         }
     }
 }

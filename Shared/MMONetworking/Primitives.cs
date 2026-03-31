@@ -26,6 +26,26 @@ public readonly record struct PlayerSnapshot(
     SnapshotEntityKind Kind,
     int SourceZoneId);
 
+public readonly record struct ResourceNodeSnapshot(
+    string NodeId,
+    string ResourceId,
+    NetworkVector3 Position,
+    int Remaining,
+    int MaxAmount);
+
+public readonly record struct MobSnapshot(
+    string MobId,
+    string MobTypeId,
+    NetworkVector3 Position,
+    NetworkVector3 Velocity,
+    string State);
+
+public readonly record struct ZonePlayerStateUpdate(
+    Guid SessionId,
+    ulong PlayerId,
+    NetworkVector3 Position,
+    NetworkVector3 Velocity);
+
 public readonly record struct ZoneDefinition(
     int ZoneId,
     string Name,

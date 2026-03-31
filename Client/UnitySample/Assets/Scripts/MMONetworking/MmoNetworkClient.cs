@@ -13,6 +13,8 @@ public sealed class MmoNetworkClient : MonoBehaviour
     [SerializeField] private string gatewayHost = "127.0.0.1";
     [SerializeField] private int gatewayTcpPort = 7000;
     [SerializeField] private string accountId = "player-local";
+    [SerializeField] private string password = "changeme123";
+    [SerializeField] private AccountAuthMode authMode = AccountAuthMode.Login;
     [SerializeField] private int requestedZoneId = 1;
     [SerializeField] private bool connectOnStart = true;
 
@@ -73,7 +75,7 @@ public sealed class MmoNetworkClient : MonoBehaviour
 
         await WireProtocol.WriteTcpMessageAsync(
             stream,
-            new ClientHelloMessage(WireProtocol.CurrentProtocolVersion, accountId, requestedZoneId),
+            new ClientHelloMessage(WireProtocol.CurrentProtocolVersion, accountId, password, authMode, requestedZoneId),
             _sessionCancellation.Token);
 
         var response = await WireProtocol.ReadTcpMessageAsync(stream, _sessionCancellation.Token);

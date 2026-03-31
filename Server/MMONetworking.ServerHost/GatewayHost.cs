@@ -10,6 +10,7 @@ namespace MMONetworking.ServerHost;
 
 public sealed class GatewayHost
 {
+    private readonly AccountStore _accountStore;
     private readonly ZoneDirectory _zoneDirectory;
     private readonly SessionRegistry _sessionRegistry;
     private readonly ZoneSupervisor _zoneSupervisor;
@@ -20,8 +21,9 @@ public sealed class GatewayHost
     private long _errors;
     private readonly int _port;
 
-    public GatewayHost(ZoneDirectory zoneDirectory, SessionRegistry sessionRegistry, ZoneSupervisor zoneSupervisor, ModerationStore moderationStore, int port)
+    public GatewayHost(AccountStore accountStore, ZoneDirectory zoneDirectory, SessionRegistry sessionRegistry, ZoneSupervisor zoneSupervisor, ModerationStore moderationStore, int port)
     {
+        _accountStore = accountStore;
         _zoneDirectory = zoneDirectory;
         _sessionRegistry = sessionRegistry;
         _zoneSupervisor = zoneSupervisor;
@@ -70,16 +72,41 @@ public sealed class GatewayHost
                     return;
                 }
 
-                if (_moderationStore.IsAccountBanned(hello.AccountId))
+                AccountAuthResult authResult;
+                try
+                {
+                    authResult = _accountStore.Authenticate(hello.AccountId, hello.Password, hello.AuthMode);
+                }
+                catch (InvalidOperationException ex)
+                {
+                    await WireProtocol.WriteTcpMessageAsync(stream, new ErrorMessage(ex.Message), cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+
+                if (!authResult.Success)
+                {
+                    await WireProtocol.WriteTcpMessageAsync(stream, new ErrorMessage(authResult.ErrorText), cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+
+                if (_moderationStore.IsAccountBanned(authResult.AccountId))
                 {
                     await WireProtocol.WriteTcpMessageAsync(stream, new ErrorMessage("Account is banned."), cancellationToken).ConfigureAwait(false);
                     return;
                 }
 
                 var zone = _zoneDirectory.GetZone(hello.RequestedZoneId == 0 ? 1 : hello.RequestedZoneId);
-                await _zoneSupervisor.EnsureRunningAsync(zone.ZoneId, cancellationToken).ConfigureAwait(false);
+                try
+                {
+                    await _zoneSupervisor.EnsureRunningAsync(zone.ZoneId, cancellationToken).ConfigureAwait(false);
+                }
+                catch (Exception ex)
+                {
+                    await WireProtocol.WriteTcpMessageAsync(stream, new ErrorMessage("Zone startup failed: " + ex.Message), cancellationToken).ConfigureAwait(false);
+                    return;
+                }
                 var spawn = new NetworkVector3(zone.MinX + 5f, 0f, zone.MinZ + 5f);
-                var session = _sessionRegistry.CreateSession(hello.AccountId, zone.ZoneId, spawn);
+                var session = _sessionRegistry.CreateSession(authResult.AccountId, authResult.AccountName, authResult.CharacterId, zone.ZoneId, spawn);
                 var token = _sessionRegistry.IssueTransferToken(session.SessionId, zone.ZoneId, spawn);
 
                 var accepted = new HelloAcceptedMessage(
@@ -94,7 +121,7 @@ public sealed class GatewayHost
 
                 await WireProtocol.WriteTcpMessageAsync(stream, accepted, cancellationToken).ConfigureAwait(false);
                 Interlocked.Increment(ref _successfulLogins);
-                Console.WriteLine($"Gateway assigned player {session.PlayerId} to zone {zone.ZoneId}.");
+                Console.WriteLine($"Gateway authenticated account {authResult.AccountName} ({authResult.AccountId}) and assigned character {session.PlayerId} to zone {zone.ZoneId}.");
             }
         }
         catch (IOException)

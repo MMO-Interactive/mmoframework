@@ -25,12 +25,12 @@ public sealed class CombatStore
             var combatants = new List<CombatantSnapshot>();
             using (var command = connection.CreateCommand())
             {
-                command.CommandText = "SELECT account_id, hp, max_hp, stamina, deaths FROM combatant_state ORDER BY account_id;";
+                command.CommandText = "SELECT character_id, hp, max_hp, stamina, deaths FROM combatant_state ORDER BY character_id;";
                 using var reader = command.ExecuteReader();
                 while (reader.Read())
                 {
                     combatants.Add(new CombatantSnapshot(
-                        reader.GetString(0),
+                        reader.IsDBNull(0) ? 0UL : (ulong)reader.GetInt64(0),
                         reader.GetInt32(1),
                         reader.GetInt32(2),
                         reader.GetInt32(3),
@@ -41,7 +41,7 @@ public sealed class CombatStore
             var actions = new List<CombatActionSnapshot>();
             using (var command = connection.CreateCommand())
             {
-                command.CommandText = "SELECT id, action_type, attacker_account_id, target_account_id, damage, remaining_hp, notes, created_at_utc FROM combat_actions ORDER BY id DESC LIMIT $limit;";
+                command.CommandText = "SELECT id, action_type, attacker_character_id, target_character_id, damage, remaining_hp, notes, created_at_utc FROM combat_actions ORDER BY id DESC LIMIT $limit;";
                 command.Parameters.AddWithValue("$limit", actionLimit);
                 using var reader = command.ExecuteReader();
                 while (reader.Read())
@@ -49,8 +49,8 @@ public sealed class CombatStore
                     actions.Add(new CombatActionSnapshot(
                         reader.GetInt64(0),
                         reader.GetString(1),
-                        reader.IsDBNull(2) ? string.Empty : reader.GetString(2),
-                        reader.IsDBNull(3) ? string.Empty : reader.GetString(3),
+                        reader.IsDBNull(2) ? 0UL : (ulong)reader.GetInt64(2),
+                        reader.IsDBNull(3) ? 0UL : (ulong)reader.GetInt64(3),
                         reader.GetInt32(4),
                         reader.GetInt32(5),
                         reader.IsDBNull(6) ? string.Empty : reader.GetString(6),
@@ -62,20 +62,20 @@ public sealed class CombatStore
         }
     }
 
-    public CombatSnapshot EnsureCombatant(string accountId)
+    public CombatSnapshot EnsureCombatant(ulong characterId)
     {
         lock (_sync)
         {
             using var connection = new SqliteConnection(_connectionString);
             connection.Open();
-            EnsureCombatantExists(connection, accountId);
+            EnsureCombatantExists(connection, characterId);
             return GetSnapshot();
         }
     }
 
-    public CombatSnapshot Attack(string attackerAccountId, string targetAccountId, int baseDamage)
+    public CombatSnapshot Attack(ulong attackerCharacterId, ulong targetCharacterId, int baseDamage)
     {
-        if (string.IsNullOrWhiteSpace(attackerAccountId) || string.IsNullOrWhiteSpace(targetAccountId))
+        if (attackerCharacterId == 0 || targetCharacterId == 0)
         {
             throw new InvalidOperationException("attacker and target are required.");
         }
@@ -86,11 +86,11 @@ public sealed class CombatStore
             connection.Open();
             using var tx = connection.BeginTransaction();
 
-            EnsureCombatantExists(connection, attackerAccountId, tx);
-            EnsureCombatantExists(connection, targetAccountId, tx);
+            EnsureCombatantExists(connection, attackerCharacterId, tx);
+            EnsureCombatantExists(connection, targetCharacterId, tx);
 
-            var attacker = LoadState(connection, tx, attackerAccountId);
-            var target = LoadState(connection, tx, targetAccountId);
+            var attacker = LoadState(connection, tx, attackerCharacterId);
+            var target = LoadState(connection, tx, targetCharacterId);
 
             var damage = Math.Max(1, baseDamage + (attacker.Stamina / 20));
             target.HitPoints = Math.Max(0, target.HitPoints - damage);
@@ -107,43 +107,43 @@ public sealed class CombatStore
 
             SaveState(connection, tx, attacker);
             SaveState(connection, tx, target);
-            InsertAction(connection, tx, "attack", attackerAccountId, targetAccountId, damage, target.HitPoints, notes);
+            InsertAction(connection, tx, "attack", attackerCharacterId, targetCharacterId, damage, target.HitPoints, notes);
             tx.Commit();
         }
 
         return GetSnapshot();
     }
 
-    private static void EnsureCombatantExists(SqliteConnection connection, string accountId, SqliteTransaction? tx = null)
+    private static void EnsureCombatantExists(SqliteConnection connection, ulong characterId, SqliteTransaction? tx = null)
     {
         using var command = connection.CreateCommand();
         command.Transaction = tx;
         command.CommandText =
             """
-            INSERT INTO combatant_state(account_id, hp, max_hp, stamina, deaths, updated_at_utc)
-            VALUES ($account, 100, 100, 100, 0, $updated)
-            ON CONFLICT(account_id) DO NOTHING;
+            INSERT INTO combatant_state(character_id, hp, max_hp, stamina, deaths, updated_at_utc)
+            VALUES ($character, 100, 100, 100, 0, $updated)
+            ON CONFLICT(character_id) DO NOTHING;
             """;
-        command.Parameters.AddWithValue("$account", accountId);
+        command.Parameters.AddWithValue("$character", unchecked((long)characterId));
         command.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
         command.ExecuteNonQuery();
     }
 
-    private static MutableCombatant LoadState(SqliteConnection connection, SqliteTransaction tx, string accountId)
+    private static MutableCombatant LoadState(SqliteConnection connection, SqliteTransaction tx, ulong characterId)
     {
         using var command = connection.CreateCommand();
         command.Transaction = tx;
-        command.CommandText = "SELECT account_id, hp, max_hp, stamina, deaths FROM combatant_state WHERE account_id = $account LIMIT 1;";
-        command.Parameters.AddWithValue("$account", accountId);
+        command.CommandText = "SELECT character_id, hp, max_hp, stamina, deaths FROM combatant_state WHERE character_id = $character LIMIT 1;";
+        command.Parameters.AddWithValue("$character", unchecked((long)characterId));
         using var reader = command.ExecuteReader();
         if (!reader.Read())
         {
-            throw new InvalidOperationException($"Combatant not found: {accountId}");
+            throw new InvalidOperationException($"Combatant not found: {characterId}");
         }
 
         return new MutableCombatant
         {
-            AccountId = reader.GetString(0),
+            CharacterId = (ulong)reader.GetInt64(0),
             HitPoints = reader.GetInt32(1),
             MaxHitPoints = reader.GetInt32(2),
             Stamina = reader.GetInt32(3),
@@ -163,9 +163,9 @@ public sealed class CombatStore
                 stamina = $stamina,
                 deaths = $deaths,
                 updated_at_utc = $updated
-            WHERE account_id = $account;
+            WHERE character_id = $character;
             """;
-        command.Parameters.AddWithValue("$account", state.AccountId);
+        command.Parameters.AddWithValue("$character", unchecked((long)state.CharacterId));
         command.Parameters.AddWithValue("$hp", state.HitPoints);
         command.Parameters.AddWithValue("$maxHp", state.MaxHitPoints);
         command.Parameters.AddWithValue("$stamina", state.Stamina);
@@ -174,18 +174,18 @@ public sealed class CombatStore
         command.ExecuteNonQuery();
     }
 
-    private static void InsertAction(SqliteConnection connection, SqliteTransaction tx, string actionType, string attacker, string target, int damage, int remainingHp, string notes)
+    private static void InsertAction(SqliteConnection connection, SqliteTransaction tx, string actionType, ulong attacker, ulong target, int damage, int remainingHp, string notes)
     {
         using var command = connection.CreateCommand();
         command.Transaction = tx;
         command.CommandText =
             """
-            INSERT INTO combat_actions(action_type, attacker_account_id, target_account_id, damage, remaining_hp, notes, created_at_utc)
+            INSERT INTO combat_actions(action_type, attacker_character_id, target_character_id, damage, remaining_hp, notes, created_at_utc)
             VALUES ($type, $attacker, $target, $damage, $remaining, $notes, $created);
             """;
         command.Parameters.AddWithValue("$type", actionType);
-        command.Parameters.AddWithValue("$attacker", attacker);
-        command.Parameters.AddWithValue("$target", target);
+        command.Parameters.AddWithValue("$attacker", unchecked((long)attacker));
+        command.Parameters.AddWithValue("$target", unchecked((long)target));
         command.Parameters.AddWithValue("$damage", damage);
         command.Parameters.AddWithValue("$remaining", remainingHp);
         command.Parameters.AddWithValue("$notes", notes);
@@ -203,6 +203,7 @@ public sealed class CombatStore
                 """
                 CREATE TABLE IF NOT EXISTS combatant_state (
                     account_id TEXT PRIMARY KEY,
+                    character_id INTEGER NULL,
                     hp INTEGER NOT NULL,
                     max_hp INTEGER NOT NULL,
                     stamina INTEGER NOT NULL,
@@ -222,6 +223,8 @@ public sealed class CombatStore
                     action_type TEXT NOT NULL,
                     attacker_account_id TEXT,
                     target_account_id TEXT,
+                    attacker_character_id INTEGER NULL,
+                    target_character_id INTEGER NULL,
                     damage INTEGER NOT NULL,
                     remaining_hp INTEGER NOT NULL,
                     notes TEXT,
@@ -230,11 +233,48 @@ public sealed class CombatStore
                 """;
             command.ExecuteNonQuery();
         }
+
+        using (var migrateState = connection.CreateCommand())
+        {
+            migrateState.CommandText =
+                """
+                UPDATE combatant_state
+                SET character_id = (
+                    SELECT primary_character_id
+                    FROM accounts
+                    WHERE accounts.account_id = combatant_state.account_id
+                )
+                WHERE character_id IS NULL;
+                """;
+            migrateState.ExecuteNonQuery();
+        }
+
+        using (var migrateActions = connection.CreateCommand())
+        {
+            migrateActions.CommandText =
+                """
+                UPDATE combat_actions
+                SET attacker_character_id = (
+                        SELECT primary_character_id FROM accounts WHERE accounts.account_id = combat_actions.attacker_account_id
+                    ),
+                    target_character_id = (
+                        SELECT primary_character_id FROM accounts WHERE accounts.account_id = combat_actions.target_account_id
+                    )
+                WHERE attacker_character_id IS NULL OR target_character_id IS NULL;
+                """;
+            migrateActions.ExecuteNonQuery();
+        }
+
+        using (var stateIndex = connection.CreateCommand())
+        {
+            stateIndex.CommandText = "CREATE UNIQUE INDEX IF NOT EXISTS ix_combatant_state_character ON combatant_state(character_id);";
+            stateIndex.ExecuteNonQuery();
+        }
     }
 
     private sealed class MutableCombatant
     {
-        public string AccountId { get; set; } = string.Empty;
+        public ulong CharacterId { get; set; }
         public int HitPoints { get; set; }
         public int MaxHitPoints { get; set; }
         public int Stamina { get; set; }

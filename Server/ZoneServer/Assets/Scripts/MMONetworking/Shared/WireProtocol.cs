@@ -112,6 +112,14 @@ public static class WireProtocol
             return;
         }
 
+        if (message is DisconnectNoticeMessage disconnect)
+        {
+            writer.Write(disconnect.Reason);
+            writer.Write(disconnect.CanReconnect);
+            writer.Write(disconnect.GraceSeconds);
+            return;
+        }
+
         if (message is ZoneAttachAuthorizeMessage authorize)
         {
             WriteGuid(writer, authorize.SessionId);
@@ -181,6 +189,37 @@ public static class WireProtocol
             return;
         }
 
+        if (message is ZoneMobStateUpdateMessage mobStateUpdate)
+        {
+            writer.Write(mobStateUpdate.ZoneId);
+            writer.Write(mobStateUpdate.Mobs.Length);
+            for (var i = 0; i < mobStateUpdate.Mobs.Length; i++)
+            {
+                var mob = mobStateUpdate.Mobs[i];
+                writer.Write(mob.MobId);
+                writer.Write(mob.MobTypeId);
+                WriteVector3(writer, mob.Position);
+                WriteVector3(writer, mob.Velocity);
+                writer.Write(mob.State);
+            }
+            return;
+        }
+
+        if (message is ZoneStateBatchUpdateMessage stateBatch)
+        {
+            writer.Write(stateBatch.ZoneId);
+            writer.Write(stateBatch.Players.Length);
+            for (var i = 0; i < stateBatch.Players.Length; i++)
+            {
+                var player = stateBatch.Players[i];
+                WriteGuid(writer, player.SessionId);
+                writer.Write(player.PlayerId);
+                WriteVector3(writer, player.Position);
+                WriteVector3(writer, player.Velocity);
+            }
+            return;
+        }
+
         if (message is GameplayCommandMessage gameplayCommand)
         {
             WriteGuid(writer, gameplayCommand.SessionId);
@@ -221,6 +260,8 @@ public static class WireProtocol
                 return new HeartbeatMessage(reader.ReadInt64());
             case TcpMessageKind.Error:
                 return new ErrorMessage(reader.ReadString());
+            case TcpMessageKind.DisconnectNotice:
+                return new DisconnectNoticeMessage(reader.ReadString(), reader.ReadBoolean(), reader.ReadInt32());
             case TcpMessageKind.ZoneAttachAuthorize:
                 return new ZoneAttachAuthorizeMessage(ReadGuid(reader), reader.ReadUInt64(), reader.ReadInt32(), reader.ReadString());
             case TcpMessageKind.ZoneAttachAuthorized:
@@ -235,6 +276,10 @@ public static class WireProtocol
                 return new ZonePrewarmRequestMessage(ReadGuid(reader), reader.ReadInt32(), ReadVector3(reader));
             case TcpMessageKind.ZonePrewarmResponse:
                 return new ZonePrewarmResponseMessage(reader.ReadBoolean(), ReadGuid(reader), reader.ReadInt32(), reader.ReadInt32(), reader.ReadString());
+            case TcpMessageKind.ZoneMobStateUpdate:
+                return ReadZoneMobStateUpdate(reader);
+            case TcpMessageKind.ZoneStateBatchUpdate:
+                return ReadZoneStateBatchUpdate(reader);
             case TcpMessageKind.GameplayCommand:
                 return new GameplayCommandMessage(ReadGuid(reader), reader.ReadUInt32(), (GameplayCommandKind)reader.ReadByte(), reader.ReadString());
             case TcpMessageKind.GameplayResult:
@@ -268,6 +313,26 @@ public static class WireProtocol
                 WriteVector3(writer, player.Velocity);
                 writer.Write((byte)player.Kind);
                 writer.Write(player.SourceZoneId);
+            }
+            writer.Write(snapshot.ResourceNodes.Length);
+            for (var i = 0; i < snapshot.ResourceNodes.Length; i++)
+            {
+                var node = snapshot.ResourceNodes[i];
+                writer.Write(node.NodeId);
+                writer.Write(node.ResourceId);
+                WriteVector3(writer, node.Position);
+                writer.Write(node.Remaining);
+                writer.Write(node.MaxAmount);
+            }
+            writer.Write(snapshot.Mobs.Length);
+            for (var i = 0; i < snapshot.Mobs.Length; i++)
+            {
+                var mob = snapshot.Mobs[i];
+                writer.Write(mob.MobId);
+                writer.Write(mob.MobTypeId);
+                WriteVector3(writer, mob.Position);
+                WriteVector3(writer, mob.Velocity);
+                writer.Write(mob.State);
             }
 
             return;
@@ -323,7 +388,66 @@ public static class WireProtocol
                 reader.ReadInt32());
         }
 
-        return new WorldSnapshotMessage(zoneId, tick, players);
+        var nodeCount = reader.ReadInt32();
+        var nodes = new ResourceNodeSnapshot[nodeCount];
+        for (var i = 0; i < nodeCount; i++)
+        {
+            nodes[i] = new ResourceNodeSnapshot(
+                reader.ReadString(),
+                reader.ReadString(),
+                ReadVector3(reader),
+                reader.ReadInt32(),
+                reader.ReadInt32());
+        }
+
+        var mobCount = reader.ReadInt32();
+        var mobs = new MobSnapshot[mobCount];
+        for (var i = 0; i < mobCount; i++)
+        {
+            mobs[i] = new MobSnapshot(
+                reader.ReadString(),
+                reader.ReadString(),
+                ReadVector3(reader),
+                ReadVector3(reader),
+                reader.ReadString());
+        }
+
+        return new WorldSnapshotMessage(zoneId, tick, players, nodes, mobs);
+    }
+
+    private static ZoneMobStateUpdateMessage ReadZoneMobStateUpdate(BinaryReader reader)
+    {
+        var zoneId = reader.ReadInt32();
+        var count = reader.ReadInt32();
+        var mobs = new MobSnapshot[count];
+        for (var i = 0; i < count; i++)
+        {
+            mobs[i] = new MobSnapshot(
+                reader.ReadString(),
+                reader.ReadString(),
+                ReadVector3(reader),
+                ReadVector3(reader),
+                reader.ReadString());
+        }
+
+        return new ZoneMobStateUpdateMessage(zoneId, mobs);
+    }
+
+    private static ZoneStateBatchUpdateMessage ReadZoneStateBatchUpdate(BinaryReader reader)
+    {
+        var zoneId = reader.ReadInt32();
+        var count = reader.ReadInt32();
+        var players = new ZonePlayerStateUpdate[count];
+        for (var i = 0; i < count; i++)
+        {
+            players[i] = new ZonePlayerStateUpdate(
+                ReadGuid(reader),
+                reader.ReadUInt64(),
+                ReadVector3(reader),
+                ReadVector3(reader));
+        }
+
+        return new ZoneStateBatchUpdateMessage(zoneId, players);
     }
 
     private static async Task<byte[]> ReadExactAsync(Stream stream, int byteCount, CancellationToken cancellationToken)

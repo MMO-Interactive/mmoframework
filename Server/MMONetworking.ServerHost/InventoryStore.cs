@@ -16,11 +16,11 @@ public sealed class InventoryStore
         EnsureSchema();
     }
 
-    public InventorySnapshot GetInventory(string accountId, int capacity = 40)
+    public InventorySnapshot GetInventory(ulong characterId, int capacity = 40)
     {
-        if (string.IsNullOrWhiteSpace(accountId))
+        if (characterId == 0)
         {
-            throw new InvalidOperationException("accountId is required.");
+            throw new InvalidOperationException("characterId is required.");
         }
 
         lock (_sync)
@@ -29,8 +29,8 @@ public sealed class InventoryStore
             connection.Open();
             using var command = connection.CreateCommand();
             command.CommandText =
-                "SELECT slot_index, item_id, quantity FROM inventory_slots WHERE account_id = $account ORDER BY slot_index;";
-            command.Parameters.AddWithValue("$account", accountId);
+                "SELECT slot_index, item_id, quantity FROM inventory_slots WHERE character_id = $character ORDER BY slot_index;";
+            command.Parameters.AddWithValue("$character", unchecked((long)characterId));
 
             using var reader = command.ExecuteReader();
             var slots = new List<InventorySlotSnapshot>();
@@ -39,11 +39,11 @@ public sealed class InventoryStore
                 slots.Add(new InventorySlotSnapshot(reader.GetInt32(0), reader.GetString(1), reader.GetInt32(2)));
             }
 
-            return new InventorySnapshot(accountId, capacity, slots.ToArray());
+            return new InventorySnapshot(characterId, capacity, slots.ToArray());
         }
     }
 
-    public InventorySnapshot AddItem(string accountId, string itemId, int quantity, int maxStack, int capacity = 40)
+    public InventorySnapshot AddItem(ulong characterId, string itemId, int quantity, int maxStack, int capacity = 40)
     {
         if (quantity <= 0)
         {
@@ -61,7 +61,7 @@ public sealed class InventoryStore
             connection.Open();
             using var tx = connection.BeginTransaction();
 
-            var slots = ReadSlots(connection, tx, accountId);
+            var slots = ReadSlots(connection, tx, characterId);
             var remaining = quantity;
 
             foreach (var slot in slots.Where(slot => string.Equals(slot.ItemId, itemId, StringComparison.OrdinalIgnoreCase) && slot.Quantity < maxStack))
@@ -92,21 +92,21 @@ public sealed class InventoryStore
                 remaining -= add;
             }
 
-            PersistSlots(connection, tx, accountId, slots);
+            PersistSlots(connection, tx, characterId, slots);
             tx.Commit();
         }
 
-        return GetInventory(accountId, capacity);
+        return GetInventory(characterId, capacity);
     }
 
-    public InventorySnapshot Move(string accountId, int fromSlot, int toSlot, int capacity = 40)
+    public InventorySnapshot Move(ulong characterId, int fromSlot, int toSlot, int capacity = 40)
     {
         lock (_sync)
         {
             using var connection = new SqliteConnection(_connectionString);
             connection.Open();
             using var tx = connection.BeginTransaction();
-            var slots = ReadSlots(connection, tx, accountId);
+            var slots = ReadSlots(connection, tx, characterId);
 
             var source = slots.FirstOrDefault(slot => slot.SlotIndex == fromSlot)
                          ?? throw new InvalidOperationException("Source slot is empty.");
@@ -122,14 +122,14 @@ public sealed class InventoryStore
                 (source.Quantity, target.Quantity) = (target.Quantity, source.Quantity);
             }
 
-            PersistSlots(connection, tx, accountId, slots);
+            PersistSlots(connection, tx, characterId, slots);
             tx.Commit();
         }
 
-        return GetInventory(accountId, capacity);
+        return GetInventory(characterId, capacity);
     }
 
-    public InventorySnapshot Split(string accountId, int fromSlot, int toSlot, int quantity, int capacity = 40)
+    public InventorySnapshot Split(ulong characterId, int fromSlot, int toSlot, int quantity, int capacity = 40)
     {
         if (quantity <= 0)
         {
@@ -141,7 +141,7 @@ public sealed class InventoryStore
             using var connection = new SqliteConnection(_connectionString);
             connection.Open();
             using var tx = connection.BeginTransaction();
-            var slots = ReadSlots(connection, tx, accountId);
+            var slots = ReadSlots(connection, tx, characterId);
 
             var source = slots.FirstOrDefault(slot => slot.SlotIndex == fromSlot)
                          ?? throw new InvalidOperationException("Source slot is empty.");
@@ -159,14 +159,14 @@ public sealed class InventoryStore
             source.Quantity -= quantity;
             slots.Add(new MutableSlot(toSlot, source.ItemId, quantity));
 
-            PersistSlots(connection, tx, accountId, slots);
+            PersistSlots(connection, tx, characterId, slots);
             tx.Commit();
         }
 
-        return GetInventory(accountId, capacity);
+        return GetInventory(characterId, capacity);
     }
 
-    public InventorySnapshot Remove(string accountId, int slotIndex, int quantity, int capacity = 40)
+    public InventorySnapshot Remove(ulong characterId, int slotIndex, int quantity, int capacity = 40)
     {
         if (quantity <= 0)
         {
@@ -178,7 +178,7 @@ public sealed class InventoryStore
             using var connection = new SqliteConnection(_connectionString);
             connection.Open();
             using var tx = connection.BeginTransaction();
-            var slots = ReadSlots(connection, tx, accountId);
+            var slots = ReadSlots(connection, tx, characterId);
 
             var slot = slots.FirstOrDefault(entry => entry.SlotIndex == slotIndex)
                        ?? throw new InvalidOperationException("Slot is empty.");
@@ -189,14 +189,14 @@ public sealed class InventoryStore
                 slots.Remove(slot);
             }
 
-            PersistSlots(connection, tx, accountId, slots);
+            PersistSlots(connection, tx, characterId, slots);
             tx.Commit();
         }
 
-        return GetInventory(accountId, capacity);
+        return GetInventory(characterId, capacity);
     }
 
-    public InventorySnapshot Craft(string accountId, CraftingRecipeSnapshot recipe, int outputMaxStack, int capacity = 40)
+    public InventorySnapshot Craft(ulong characterId, CraftingRecipeSnapshot recipe, int outputMaxStack, int capacity = 40)
     {
         if (recipe.Ingredients.Length == 0)
         {
@@ -208,7 +208,7 @@ public sealed class InventoryStore
             using var connection = new SqliteConnection(_connectionString);
             connection.Open();
             using var tx = connection.BeginTransaction();
-            var slots = ReadSlots(connection, tx, accountId);
+            var slots = ReadSlots(connection, tx, characterId);
 
             foreach (var ingredient in recipe.Ingredients)
             {
@@ -271,20 +271,20 @@ public sealed class InventoryStore
                 outputRemaining -= add;
             }
 
-            PersistSlots(connection, tx, accountId, slots);
+            PersistSlots(connection, tx, characterId, slots);
             tx.Commit();
         }
 
-        return GetInventory(accountId, capacity);
+        return GetInventory(characterId, capacity);
     }
 
-    private static List<MutableSlot> ReadSlots(SqliteConnection connection, SqliteTransaction tx, string accountId)
+    private static List<MutableSlot> ReadSlots(SqliteConnection connection, SqliteTransaction tx, ulong characterId)
     {
         using var command = connection.CreateCommand();
         command.Transaction = tx;
         command.CommandText =
-            "SELECT slot_index, item_id, quantity FROM inventory_slots WHERE account_id = $account ORDER BY slot_index;";
-        command.Parameters.AddWithValue("$account", accountId);
+            "SELECT slot_index, item_id, quantity FROM inventory_slots WHERE character_id = $character ORDER BY slot_index;";
+        command.Parameters.AddWithValue("$character", unchecked((long)characterId));
 
         using var reader = command.ExecuteReader();
         var slots = new List<MutableSlot>();
@@ -296,13 +296,13 @@ public sealed class InventoryStore
         return slots;
     }
 
-    private static void PersistSlots(SqliteConnection connection, SqliteTransaction tx, string accountId, IReadOnlyCollection<MutableSlot> slots)
+    private static void PersistSlots(SqliteConnection connection, SqliteTransaction tx, ulong characterId, IReadOnlyCollection<MutableSlot> slots)
     {
         using (var clear = connection.CreateCommand())
         {
             clear.Transaction = tx;
-            clear.CommandText = "DELETE FROM inventory_slots WHERE account_id = $account;";
-            clear.Parameters.AddWithValue("$account", accountId);
+            clear.CommandText = "DELETE FROM inventory_slots WHERE character_id = $character;";
+            clear.Parameters.AddWithValue("$character", unchecked((long)characterId));
             clear.ExecuteNonQuery();
         }
 
@@ -311,8 +311,8 @@ public sealed class InventoryStore
             using var insert = connection.CreateCommand();
             insert.Transaction = tx;
             insert.CommandText =
-                "INSERT INTO inventory_slots(account_id, slot_index, item_id, quantity, updated_at_utc) VALUES ($account,$slot,$item,$qty,$updated);";
-            insert.Parameters.AddWithValue("$account", accountId);
+                "INSERT INTO inventory_slots(character_id, slot_index, item_id, quantity, updated_at_utc) VALUES ($character,$slot,$item,$qty,$updated);";
+            insert.Parameters.AddWithValue("$character", unchecked((long)characterId));
             insert.Parameters.AddWithValue("$slot", slot.SlotIndex);
             insert.Parameters.AddWithValue("$item", slot.ItemId);
             insert.Parameters.AddWithValue("$qty", slot.Quantity);
@@ -330,6 +330,7 @@ public sealed class InventoryStore
             """
             CREATE TABLE IF NOT EXISTS inventory_slots (
                 account_id TEXT NOT NULL,
+                character_id INTEGER NULL,
                 slot_index INTEGER NOT NULL,
                 item_id TEXT NOT NULL,
                 quantity INTEGER NOT NULL,
@@ -338,6 +339,27 @@ public sealed class InventoryStore
             );
             """;
         command.ExecuteNonQuery();
+
+        using (var migrateColumn = connection.CreateCommand())
+        {
+            migrateColumn.CommandText =
+                """
+                UPDATE inventory_slots
+                SET character_id = (
+                    SELECT primary_character_id
+                    FROM accounts
+                    WHERE accounts.account_id = inventory_slots.account_id
+                )
+                WHERE character_id IS NULL;
+                """;
+            migrateColumn.ExecuteNonQuery();
+        }
+
+        using (var index = connection.CreateCommand())
+        {
+            index.CommandText = "CREATE UNIQUE INDEX IF NOT EXISTS ix_inventory_slots_character_slot ON inventory_slots(character_id, slot_index);";
+            index.ExecuteNonQuery();
+        }
     }
 
     private sealed class MutableSlot

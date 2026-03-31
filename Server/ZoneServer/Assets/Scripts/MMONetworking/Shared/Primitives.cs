@@ -48,6 +48,58 @@ public readonly struct PlayerSnapshot
     public int SourceZoneId { get; }
 }
 
+public readonly struct ResourceNodeSnapshot
+{
+    public ResourceNodeSnapshot(string nodeId, string resourceId, NetworkVector3 position, int remaining, int maxAmount)
+    {
+        NodeId = nodeId;
+        ResourceId = resourceId;
+        Position = position;
+        Remaining = remaining;
+        MaxAmount = maxAmount;
+    }
+
+    public string NodeId { get; }
+    public string ResourceId { get; }
+    public NetworkVector3 Position { get; }
+    public int Remaining { get; }
+    public int MaxAmount { get; }
+}
+
+public readonly struct MobSnapshot
+{
+    public MobSnapshot(string mobId, string mobTypeId, NetworkVector3 position, NetworkVector3 velocity, string state)
+    {
+        MobId = mobId;
+        MobTypeId = mobTypeId;
+        Position = position;
+        Velocity = velocity;
+        State = state;
+    }
+
+    public string MobId { get; }
+    public string MobTypeId { get; }
+    public NetworkVector3 Position { get; }
+    public NetworkVector3 Velocity { get; }
+    public string State { get; }
+}
+
+public readonly struct ZonePlayerStateUpdate
+{
+    public ZonePlayerStateUpdate(Guid sessionId, ulong playerId, NetworkVector3 position, NetworkVector3 velocity)
+    {
+        SessionId = sessionId;
+        PlayerId = playerId;
+        Position = position;
+        Velocity = velocity;
+    }
+
+    public Guid SessionId { get; }
+    public ulong PlayerId { get; }
+    public NetworkVector3 Position { get; }
+    public NetworkVector3 Velocity { get; }
+}
+
 public readonly struct ZoneDefinition
 {
     public ZoneDefinition(int zoneId, string name, string host, int tcpPort, int udpPort, float minX, float maxX, float minZ, float maxZ)

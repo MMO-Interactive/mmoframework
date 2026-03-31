@@ -18,10 +18,14 @@ public sealed record SessionSnapshot(
     Guid SessionId,
     ulong PlayerId,
     string AccountId,
+    string AccountName,
     int CurrentZoneId,
     float PositionX,
     float PositionY,
     float PositionZ,
+    DateTimeOffset LastTcpSeenUtc,
+    DateTimeOffset LastUdpSeenUtc,
+    DateTimeOffset? DisconnectGraceDeadlineUtc,
     PendingAttachmentSnapshot[] PendingAttachments);
 
 public sealed record PendingAttachmentSnapshot(
@@ -52,7 +56,8 @@ public sealed record ZoneRuntimeSnapshot(
     float GhostMargin,
     float PrewarmMargin,
     float TransferInset,
-    ZonePlayerSnapshot[] Players);
+    ZonePlayerSnapshot[] Players,
+    ZoneMobSnapshot[] Mobs);
 
 public sealed record ZonePlayerSnapshot(
     Guid SessionId,
@@ -64,6 +69,17 @@ public sealed record ZonePlayerSnapshot(
     float VelocityY,
     float VelocityZ,
     int? PendingDestinationZoneId);
+
+public sealed record ZoneMobSnapshot(
+    string MobId,
+    string MobTypeId,
+    float PositionX,
+    float PositionY,
+    float PositionZ,
+    float VelocityX,
+    float VelocityY,
+    float VelocityZ,
+    string State);
 
 public sealed record GameplayDefinitionsSnapshot(
     ItemDefinitionSnapshot[] Items,
@@ -118,6 +134,18 @@ public sealed record AccountModerationSnapshot(
     string UpdatedBy,
     DateTimeOffset UpdatedAtUtc);
 
+public sealed record CharacterSummarySnapshot(
+    ulong CharacterId,
+    string CharacterName,
+    DateTimeOffset CreatedAtUtc,
+    DateTimeOffset? LastSelectedAtUtc);
+
+public sealed record AccountCharacterListSnapshot(
+    string AccountId,
+    string AccountName,
+    ulong SelectedCharacterId,
+    CharacterSummarySnapshot[] Characters);
+
 public sealed record ModerationActionSnapshot(
     long Id,
     string ActionType,
@@ -129,7 +157,7 @@ public sealed record ModerationActionSnapshot(
     DateTimeOffset CreatedAtUtc);
 
 public sealed record InventorySnapshot(
-    string AccountId,
+    ulong CharacterId,
     int Capacity,
     InventorySlotSnapshot[] Slots);
 
@@ -153,12 +181,12 @@ public sealed record CraftingRecipeSnapshot(
 public sealed record CraftingResultSnapshot(
     bool Success,
     string Message,
-    string AccountId,
+    ulong CharacterId,
     string RecipeId,
     InventorySnapshot Inventory);
 
 public sealed record CharacterProgressionSnapshot(
-    string AccountId,
+    ulong CharacterId,
     ProgressionTrackSnapshot[] Tracks);
 
 public sealed record ProgressionTrackSnapshot(
@@ -168,7 +196,7 @@ public sealed record ProgressionTrackSnapshot(
     int ExperienceToNextLevel);
 
 public sealed record CombatantSnapshot(
-    string AccountId,
+    ulong CharacterId,
     int HitPoints,
     int MaxHitPoints,
     int Stamina,
@@ -177,8 +205,8 @@ public sealed record CombatantSnapshot(
 public sealed record CombatActionSnapshot(
     long Id,
     string ActionType,
-    string AttackerAccountId,
-    string TargetAccountId,
+    ulong AttackerCharacterId,
+    ulong TargetCharacterId,
     int Damage,
     int RemainingHitPoints,
     string Notes,
@@ -202,7 +230,7 @@ public sealed record ReputationActionSnapshot(
     DateTimeOffset CreatedAtUtc);
 
 public sealed record ReputationProfileSnapshot(
-    string AccountId,
+    ulong CharacterId,
     FactionReputationSnapshot[] Factions,
     ReputationActionSnapshot[] RecentActions);
 
@@ -217,7 +245,7 @@ public sealed record QuestDefinitionSnapshot(
     int RewardReputationAmount);
 
 public sealed record QuestProgressSnapshot(
-    string AccountId,
+    ulong CharacterId,
     string QuestId,
     int ProgressCount,
     bool IsCompleted,
@@ -225,14 +253,14 @@ public sealed record QuestProgressSnapshot(
     DateTimeOffset UpdatedAtUtc);
 
 public sealed record QuestBoardSnapshot(
-    string AccountId,
+    ulong CharacterId,
     QuestDefinitionSnapshot[] Definitions,
     QuestProgressSnapshot[] Progress,
     QuestEventSnapshot[] RecentEvents);
 
 public sealed record QuestEventSnapshot(
     long Id,
-    string AccountId,
+    ulong CharacterId,
     string QuestId,
     string EventType,
     int Amount,
@@ -240,7 +268,7 @@ public sealed record QuestEventSnapshot(
     DateTimeOffset CreatedAtUtc);
 
 public sealed record QuestClaimSnapshot(
-    string AccountId,
+    ulong CharacterId,
     string QuestId,
     int AwardedExperience,
     string AwardedReputationFaction,
@@ -261,20 +289,20 @@ public sealed record WorldEventSnapshot(
 
 public sealed record WorldEventParticipationSnapshot(
     string EventId,
-    string AccountId,
+    ulong CharacterId,
     int Contribution,
     bool IsClaimed,
     DateTimeOffset UpdatedAtUtc);
 
 public sealed record WorldEventBoardSnapshot(
-    string AccountId,
+    ulong CharacterId,
     WorldEventSnapshot[] Events,
     WorldEventParticipationSnapshot[] Participation,
     WorldEventLogSnapshot[] RecentLogs);
 
 public sealed record WorldEventClaimSnapshot(
     string EventId,
-    string AccountId,
+    ulong CharacterId,
     int Contribution,
     int AwardedExperience,
     string AwardedReputationFaction,
@@ -283,14 +311,14 @@ public sealed record WorldEventClaimSnapshot(
 
 public sealed record WorldEventLeaderboardEntrySnapshot(
     int Rank,
-    string AccountId,
+    ulong CharacterId,
     int Contribution,
     bool IsClaimed);
 
 public sealed record WorldEventLogSnapshot(
     long Id,
     string EventId,
-    string AccountId,
+    ulong CharacterId,
     string ActionType,
     string Details,
     DateTimeOffset CreatedAtUtc);
@@ -308,7 +336,7 @@ public sealed record InvasionSnapshot(
 
 public sealed record InvasionContributionSnapshot(
     string InvasionId,
-    string AccountId,
+    ulong CharacterId,
     int Kills,
     bool IsClaimed,
     DateTimeOffset UpdatedAtUtc);
@@ -316,20 +344,20 @@ public sealed record InvasionContributionSnapshot(
 public sealed record InvasionLogSnapshot(
     long Id,
     string InvasionId,
-    string AccountId,
+    ulong CharacterId,
     string ActionType,
     string Details,
     DateTimeOffset CreatedAtUtc);
 
 public sealed record InvasionBoardSnapshot(
-    string AccountId,
+    ulong CharacterId,
     InvasionSnapshot[] Invasions,
     InvasionContributionSnapshot[] Contributions,
     InvasionLogSnapshot[] RecentLogs);
 
 public sealed record InvasionClaimSnapshot(
     string InvasionId,
-    string AccountId,
+    ulong CharacterId,
     int Kills,
     int AwardedExperience,
     string AwardedReputationFaction,

@@ -15,18 +15,18 @@ public sealed class WorldEventStore
         EnsureSchema();
     }
 
-    public WorldEventBoardSnapshot GetBoard(string accountId)
+    public WorldEventBoardSnapshot GetBoard(ulong characterId)
     {
-        if (string.IsNullOrWhiteSpace(accountId))
+        if (characterId == 0)
         {
-            throw new InvalidOperationException("accountId is required.");
+            throw new InvalidOperationException("characterId is required.");
         }
 
         lock (_sync)
         {
             using var connection = new SqliteConnection(_connectionString);
             connection.Open();
-            return LoadBoard(connection, accountId.Trim());
+            return LoadBoard(connection, characterId);
         }
     }
 
@@ -71,8 +71,8 @@ public sealed class WorldEventStore
             command.Parameters.AddWithValue("$created", DateTimeOffset.UtcNow.ToString("O"));
             command.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
             command.ExecuteNonQuery();
-            InsertLog(connection, null, worldEvent.EventId.Trim(), "__system__", "upsert", "Upserted world event definition.");
-            return LoadBoard(connection, "__all__");
+            InsertLog(connection, null, worldEvent.EventId.Trim(), 0UL, "upsert", "Upserted world event definition.");
+            return LoadBoard(connection, null);
         }
     }
 
@@ -93,16 +93,16 @@ public sealed class WorldEventStore
             command.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
             command.Parameters.AddWithValue("$eventId", eventId.Trim());
             command.ExecuteNonQuery();
-            InsertLog(connection, null, eventId.Trim(), "__system__", "state", $"State set to {state.Trim()}.");
-            return LoadBoard(connection, "__all__");
+            InsertLog(connection, null, eventId.Trim(), 0UL, "state", $"State set to {state.Trim()}.");
+            return LoadBoard(connection, null);
         }
     }
 
-    public WorldEventBoardSnapshot AddContribution(string eventId, string accountId, int amount)
+    public WorldEventBoardSnapshot AddContribution(string eventId, ulong characterId, int amount)
     {
-        if (string.IsNullOrWhiteSpace(eventId) || string.IsNullOrWhiteSpace(accountId))
+        if (string.IsNullOrWhiteSpace(eventId) || characterId == 0)
         {
-            throw new InvalidOperationException("eventId and accountId are required.");
+            throw new InvalidOperationException("eventId and characterId are required.");
         }
 
         lock (_sync)
@@ -112,27 +112,27 @@ public sealed class WorldEventStore
             using var command = connection.CreateCommand();
             command.CommandText =
                 """
-                INSERT INTO world_event_participation(event_id, account_id, contribution, is_claimed, updated_at_utc)
-                VALUES($eventId, $account, $amount, 0, $updated)
-                ON CONFLICT(event_id, account_id) DO UPDATE SET
+                INSERT INTO world_event_participation(event_id, character_id, contribution, is_claimed, updated_at_utc)
+                VALUES($eventId, $characterId, $amount, 0, $updated)
+                ON CONFLICT(event_id, character_id) DO UPDATE SET
                     contribution = contribution + excluded.contribution,
                     updated_at_utc = excluded.updated_at_utc;
                 """;
             command.Parameters.AddWithValue("$eventId", eventId.Trim());
-            command.Parameters.AddWithValue("$account", accountId.Trim());
+            command.Parameters.AddWithValue("$characterId", unchecked((long)characterId));
             command.Parameters.AddWithValue("$amount", Math.Max(1, amount));
             command.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
             command.ExecuteNonQuery();
-            InsertLog(connection, null, eventId.Trim(), accountId.Trim(), "contribution", $"Added contribution amount {Math.Max(1, amount)}.");
-            return LoadBoard(connection, accountId.Trim());
+            InsertLog(connection, null, eventId.Trim(), characterId, "contribution", $"Added contribution amount {Math.Max(1, amount)}.");
+            return LoadBoard(connection, characterId);
         }
     }
 
-    public WorldEventClaimSnapshot Claim(string eventId, string accountId)
+    public WorldEventClaimSnapshot Claim(string eventId, ulong characterId)
     {
-        if (string.IsNullOrWhiteSpace(eventId) || string.IsNullOrWhiteSpace(accountId))
+        if (string.IsNullOrWhiteSpace(eventId) || characterId == 0)
         {
-            throw new InvalidOperationException("eventId and accountId are required.");
+            throw new InvalidOperationException("eventId and characterId are required.");
         }
 
         lock (_sync)
@@ -147,7 +147,7 @@ public sealed class WorldEventStore
                 throw new InvalidOperationException("World event must be in resolved state before claiming.");
             }
 
-            var participation = LoadParticipation(connection, tx, eventId.Trim(), accountId.Trim()) ?? throw new InvalidOperationException("No participation found for this account.");
+            var participation = LoadParticipation(connection, tx, eventId.Trim(), characterId) ?? throw new InvalidOperationException("No participation found for this character.");
             if (participation.IsClaimed)
             {
                 throw new InvalidOperationException("Rewards already claimed.");
@@ -161,13 +161,13 @@ public sealed class WorldEventStore
             using (var command = connection.CreateCommand())
             {
                 command.Transaction = tx;
-                command.CommandText = "UPDATE world_event_participation SET is_claimed = 1, updated_at_utc = $updated WHERE event_id = $eventId AND account_id = $account;";
+                command.CommandText = "UPDATE world_event_participation SET is_claimed = 1, updated_at_utc = $updated WHERE event_id = $eventId AND character_id = $characterId;";
                 command.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
                 command.Parameters.AddWithValue("$eventId", eventId.Trim());
-                command.Parameters.AddWithValue("$account", accountId.Trim());
+                command.Parameters.AddWithValue("$characterId", unchecked((long)characterId));
                 command.ExecuteNonQuery();
             }
-            InsertLog(connection, tx, eventId.Trim(), accountId.Trim(), "claim", $"Claimed event rewards with contribution {participation.Contribution}.");
+            InsertLog(connection, tx, eventId.Trim(), characterId, "claim", $"Claimed event rewards with contribution {participation.Contribution}.");
 
             tx.Commit();
 
@@ -178,7 +178,7 @@ public sealed class WorldEventStore
 
             return new WorldEventClaimSnapshot(
                 eventId.Trim(),
-                accountId.Trim(),
+                characterId,
                 participation.Contribution,
                 awardedXp,
                 worldEvent.RewardReputationFaction,
@@ -222,9 +222,9 @@ public sealed class WorldEventStore
                 command.Parameters.AddWithValue("$now", nowUtc.ToString("O"));
                 command.ExecuteNonQuery();
             }
-            InsertLog(connection, null, "__lifecycle__", "__system__", "lifecycle", $"Ran lifecycle tick at {nowUtc:O}.");
+            InsertLog(connection, null, "__lifecycle__", 0UL, "lifecycle", $"Ran lifecycle tick at {nowUtc:O}.");
 
-            return LoadBoard(connection, "__all__");
+            return LoadBoard(connection, null);
         }
     }
 
@@ -243,10 +243,10 @@ public sealed class WorldEventStore
             using var command = connection.CreateCommand();
             command.CommandText =
                 """
-                SELECT account_id, contribution, is_claimed
+                SELECT character_id, contribution, is_claimed
                 FROM world_event_participation
                 WHERE event_id = $eventId
-                ORDER BY contribution DESC, account_id ASC
+                ORDER BY contribution DESC, character_id ASC
                 LIMIT $limit;
                 """;
             command.Parameters.AddWithValue("$eventId", eventId.Trim());
@@ -257,7 +257,7 @@ public sealed class WorldEventStore
             {
                 list.Add(new WorldEventLeaderboardEntrySnapshot(
                     rank++,
-                    reader.GetString(0),
+                    reader.IsDBNull(0) ? 0UL : (ulong)reader.GetInt64(0),
                     reader.GetInt32(1),
                     reader.GetInt32(2) != 0));
             }
@@ -266,7 +266,7 @@ public sealed class WorldEventStore
         }
     }
 
-    private static WorldEventBoardSnapshot LoadBoard(SqliteConnection connection, string accountId)
+    private static WorldEventBoardSnapshot LoadBoard(SqliteConnection connection, ulong? characterId)
     {
         var events = new List<WorldEventSnapshot>();
         using (var command = connection.CreateCommand())
@@ -295,23 +295,23 @@ public sealed class WorldEventStore
         }
 
         var participation = new List<WorldEventParticipationSnapshot>();
-        if (!string.Equals(accountId, "__all__", StringComparison.Ordinal))
+        if (characterId.HasValue)
         {
             using var command = connection.CreateCommand();
             command.CommandText =
                 """
-                SELECT event_id, account_id, contribution, is_claimed, updated_at_utc
+                SELECT event_id, character_id, contribution, is_claimed, updated_at_utc
                 FROM world_event_participation
-                WHERE account_id = $account
+                WHERE character_id = $characterId
                 ORDER BY event_id;
                 """;
-            command.Parameters.AddWithValue("$account", accountId);
+            command.Parameters.AddWithValue("$characterId", unchecked((long)characterId.Value));
             using var reader = command.ExecuteReader();
             while (reader.Read())
             {
                 participation.Add(new WorldEventParticipationSnapshot(
                     reader.GetString(0),
-                    reader.GetString(1),
+                    reader.IsDBNull(1) ? 0UL : (ulong)reader.GetInt64(1),
                     reader.GetInt32(2),
                     reader.GetInt32(3) != 0,
                     DateTimeOffset.Parse(reader.GetString(4))));
@@ -323,7 +323,7 @@ public sealed class WorldEventStore
         {
             command.CommandText =
                 """
-                SELECT id, event_id, account_id, action_type, details, created_at_utc
+                SELECT id, event_id, character_id, action_type, details, created_at_utc
                 FROM world_event_logs
                 ORDER BY id DESC
                 LIMIT 120;
@@ -334,27 +334,27 @@ public sealed class WorldEventStore
                 logs.Add(new WorldEventLogSnapshot(
                     reader.GetInt64(0),
                     reader.GetString(1),
-                    reader.GetString(2),
+                    reader.IsDBNull(2) ? 0UL : (ulong)reader.GetInt64(2),
                     reader.GetString(3),
                     reader.GetString(4),
                     DateTimeOffset.Parse(reader.GetString(5))));
             }
         }
 
-        return new WorldEventBoardSnapshot(accountId, events.ToArray(), participation.ToArray(), logs.ToArray());
+        return new WorldEventBoardSnapshot(characterId ?? 0UL, events.ToArray(), participation.ToArray(), logs.ToArray());
     }
 
-    private static void InsertLog(SqliteConnection connection, SqliteTransaction? tx, string eventId, string accountId, string actionType, string details)
+    private static void InsertLog(SqliteConnection connection, SqliteTransaction? tx, string eventId, ulong characterId, string actionType, string details)
     {
         using var command = connection.CreateCommand();
         command.Transaction = tx;
         command.CommandText =
             """
-            INSERT INTO world_event_logs(event_id, account_id, action_type, details, created_at_utc)
-            VALUES($eventId, $accountId, $actionType, $details, $createdAtUtc);
+            INSERT INTO world_event_logs(event_id, character_id, action_type, details, created_at_utc)
+            VALUES($eventId, $characterId, $actionType, $details, $createdAtUtc);
             """;
         command.Parameters.AddWithValue("$eventId", eventId);
-        command.Parameters.AddWithValue("$accountId", accountId);
+        command.Parameters.AddWithValue("$characterId", characterId == 0 ? DBNull.Value : unchecked((long)characterId));
         command.Parameters.AddWithValue("$actionType", actionType);
         command.Parameters.AddWithValue("$details", details);
         command.Parameters.AddWithValue("$createdAtUtc", DateTimeOffset.UtcNow.ToString("O"));
@@ -392,7 +392,7 @@ public sealed class WorldEventStore
             DateTimeOffset.Parse(reader.GetString(9)));
     }
 
-    private static WorldEventParticipationSnapshot? LoadParticipation(SqliteConnection connection, SqliteTransaction tx, string eventId, string accountId)
+    private static WorldEventParticipationSnapshot? LoadParticipation(SqliteConnection connection, SqliteTransaction tx, string eventId, ulong characterId)
     {
         using var command = connection.CreateCommand();
         command.Transaction = tx;
@@ -400,11 +400,11 @@ public sealed class WorldEventStore
             """
             SELECT contribution, is_claimed, updated_at_utc
             FROM world_event_participation
-            WHERE event_id = $eventId AND account_id = $account
+            WHERE event_id = $eventId AND character_id = $characterId
             LIMIT 1;
             """;
         command.Parameters.AddWithValue("$eventId", eventId);
-        command.Parameters.AddWithValue("$account", accountId);
+        command.Parameters.AddWithValue("$characterId", unchecked((long)characterId));
         using var reader = command.ExecuteReader();
         if (!reader.Read())
         {
@@ -413,7 +413,7 @@ public sealed class WorldEventStore
 
         return new WorldEventParticipationSnapshot(
             eventId,
-            accountId,
+            characterId,
             reader.GetInt32(0),
             reader.GetInt32(1) != 0,
             DateTimeOffset.Parse(reader.GetString(2)));
@@ -451,6 +451,7 @@ public sealed class WorldEventStore
                 CREATE TABLE IF NOT EXISTS world_event_participation (
                     event_id TEXT NOT NULL,
                     account_id TEXT NOT NULL,
+                    character_id INTEGER NULL,
                     contribution INTEGER NOT NULL,
                     is_claimed INTEGER NOT NULL,
                     updated_at_utc TEXT NOT NULL,
@@ -468,10 +469,50 @@ public sealed class WorldEventStore
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     event_id TEXT NOT NULL,
                     account_id TEXT NOT NULL,
+                    character_id INTEGER NULL,
                     action_type TEXT NOT NULL,
                     details TEXT NOT NULL,
                     created_at_utc TEXT NOT NULL
                 );
+                """;
+            command.ExecuteNonQuery();
+        }
+
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText =
+                """
+                UPDATE world_event_participation
+                SET character_id = (
+                    SELECT primary_character_id
+                    FROM accounts
+                    WHERE accounts.account_id = world_event_participation.account_id
+                )
+                WHERE character_id IS NULL;
+                """;
+            command.ExecuteNonQuery();
+        }
+
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText =
+                """
+                UPDATE world_event_logs
+                SET character_id = (
+                    SELECT primary_character_id
+                    FROM accounts
+                    WHERE accounts.account_id = world_event_logs.account_id
+                )
+                WHERE character_id IS NULL;
+                """;
+            command.ExecuteNonQuery();
+        }
+
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                CREATE UNIQUE INDEX IF NOT EXISTS ix_world_event_participation_event_character
+                ON world_event_participation(event_id, character_id);
                 """;
             command.ExecuteNonQuery();
         }

@@ -66,7 +66,9 @@
     <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoRemoteAvatarSystem.cs" />
     <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoClientSceneBootstrap.cs" />
     <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoClientStatusView.cs" />
+    <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoResourceNodeSystem.cs" />
     <Compile Include="Assets\Scripts\MMONetworking\Shared\Primitives.cs" />
+    <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoMobSystem.cs" />
     <Compile Include="Assets\Scripts\MMONetworking\Shared\WireProtocol.cs" />
     <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoClientAvatar.cs" />
     <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoMaterialFactory.cs" />

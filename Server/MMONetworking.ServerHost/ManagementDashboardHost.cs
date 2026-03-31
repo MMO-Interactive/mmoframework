@@ -12,6 +12,7 @@ namespace MMONetworking.ServerHost;
 
 public sealed class ManagementDashboardHost
 {
+    private readonly AccountStore _accountStore;
     private readonly GatewayHost _gatewayHost;
     private readonly SessionRegistry _sessionRegistry;
     private readonly ZoneSupervisor _zoneSupervisor;
@@ -27,8 +28,9 @@ public sealed class ManagementDashboardHost
     private readonly InvasionStore _invasionStore;
     private readonly int _port;
 
-    public ManagementDashboardHost(GatewayHost gatewayHost, SessionRegistry sessionRegistry, ZoneSupervisor zoneSupervisor, GameplayDefinitionStore gameplayDefinitions, ModerationStore moderationStore, InventoryStore inventoryStore, CraftingStore craftingStore, CharacterProgressionStore progressionStore, CombatStore combatStore, ReputationStore reputationStore, QuestStore questStore, WorldEventStore worldEventStore, InvasionStore invasionStore, int port)
+    public ManagementDashboardHost(AccountStore accountStore, GatewayHost gatewayHost, SessionRegistry sessionRegistry, ZoneSupervisor zoneSupervisor, GameplayDefinitionStore gameplayDefinitions, ModerationStore moderationStore, InventoryStore inventoryStore, CraftingStore craftingStore, CharacterProgressionStore progressionStore, CombatStore combatStore, ReputationStore reputationStore, QuestStore questStore, WorldEventStore worldEventStore, InvasionStore invasionStore, int port)
     {
+        _accountStore = accountStore;
         _gatewayHost = gatewayHost;
         _sessionRegistry = sessionRegistry;
         _zoneSupervisor = zoneSupervisor;
@@ -60,6 +62,69 @@ public sealed class ManagementDashboardHost
         var app = builder.Build();
 
         app.MapGet("/api/dashboard", () => Results.Json(CreateSnapshot()));
+        app.MapPost("/api/accounts/characters/list", async (HttpContext context) =>
+        {
+            var request = await JsonSerializer.DeserializeAsync<AccountCharacterAuthRequest>(
+                context.Request.Body,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true },
+                context.RequestAborted).ConfigureAwait(false);
+
+            if (request is null)
+            {
+                return Results.BadRequest(new { error = "Invalid request." });
+            }
+
+            try
+            {
+                return Results.Json(_accountStore.GetCharacterList(request.AccountName, request.Password));
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+        });
+        app.MapPost("/api/accounts/characters/create", async (HttpContext context) =>
+        {
+            var request = await JsonSerializer.DeserializeAsync<AccountCharacterCreateRequest>(
+                context.Request.Body,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true },
+                context.RequestAborted).ConfigureAwait(false);
+
+            if (request is null)
+            {
+                return Results.BadRequest(new { error = "Invalid request." });
+            }
+
+            try
+            {
+                return Results.Json(_accountStore.CreateCharacter(request.AccountName, request.Password, request.CharacterName));
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+        });
+        app.MapPost("/api/accounts/characters/select", async (HttpContext context) =>
+        {
+            var request = await JsonSerializer.DeserializeAsync<AccountCharacterSelectRequest>(
+                context.Request.Body,
+                new JsonSerializerOptions { PropertyNameCaseInsensitive = true },
+                context.RequestAborted).ConfigureAwait(false);
+
+            if (request is null)
+            {
+                return Results.BadRequest(new { error = "Invalid request." });
+            }
+
+            try
+            {
+                return Results.Json(_accountStore.SelectCharacter(request.AccountName, request.Password, request.CharacterId));
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+        });
         app.MapGet("/api/gameplay-definitions", () => Results.Json(_gameplayDefinitions.GetSnapshot()));
         app.MapPut("/api/gameplay-definitions", async (HttpContext context) =>
         {
@@ -129,11 +194,11 @@ public sealed class ManagementDashboardHost
 
             return Results.Json(_moderationStore.CreateSnapshot());
         });
-        app.MapGet("/api/inventory/{accountId}", (string accountId) =>
+        app.MapGet("/api/inventory/{characterId:long}", (ulong characterId) =>
         {
             try
             {
-                return Results.Json(_inventoryStore.GetInventory(accountId));
+                return Results.Json(_inventoryStore.GetInventory(characterId));
             }
             catch (Exception ex)
             {
@@ -150,7 +215,7 @@ public sealed class ManagementDashboardHost
 
             try
             {
-                return Results.Json(_inventoryStore.AddItem(request.AccountId, request.ItemId, request.Quantity, request.MaxStack, request.Capacity));
+                return Results.Json(_inventoryStore.AddItem(request.CharacterId, request.ItemId, request.Quantity, request.MaxStack, request.Capacity));
             }
             catch (Exception ex)
             {
@@ -167,7 +232,7 @@ public sealed class ManagementDashboardHost
 
             try
             {
-                return Results.Json(_inventoryStore.Move(request.AccountId, request.FromSlot, request.ToSlot, request.Capacity));
+                return Results.Json(_inventoryStore.Move(request.CharacterId, request.FromSlot, request.ToSlot, request.Capacity));
             }
             catch (Exception ex)
             {
@@ -184,7 +249,7 @@ public sealed class ManagementDashboardHost
 
             try
             {
-                return Results.Json(_inventoryStore.Split(request.AccountId, request.FromSlot, request.ToSlot, request.Quantity, request.Capacity));
+                return Results.Json(_inventoryStore.Split(request.CharacterId, request.FromSlot, request.ToSlot, request.Quantity, request.Capacity));
             }
             catch (Exception ex)
             {
@@ -201,7 +266,7 @@ public sealed class ManagementDashboardHost
 
             try
             {
-                return Results.Json(_inventoryStore.Remove(request.AccountId, request.SlotIndex, request.Quantity, request.Capacity));
+                return Results.Json(_inventoryStore.Remove(request.CharacterId, request.SlotIndex, request.Quantity, request.Capacity));
             }
             catch (Exception ex)
             {
@@ -230,9 +295,9 @@ public sealed class ManagementDashboardHost
         app.MapPost("/api/crafting/execute", async (HttpContext context) =>
         {
             var request = await JsonSerializer.DeserializeAsync<CraftingExecuteRequest>(context.Request.Body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }, context.RequestAborted).ConfigureAwait(false);
-            if (request is null || string.IsNullOrWhiteSpace(request.AccountId) || string.IsNullOrWhiteSpace(request.RecipeId))
+            if (request is null || request.CharacterId == 0 || string.IsNullOrWhiteSpace(request.RecipeId))
             {
-                return Results.BadRequest(new { error = "accountId and recipeId are required." });
+                return Results.BadRequest(new { error = "characterId and recipeId are required." });
             }
 
             try
@@ -243,21 +308,21 @@ public sealed class ManagementDashboardHost
                     return Results.BadRequest(new { error = "Recipe not found." });
                 }
 
-                var inventory = _inventoryStore.Craft(request.AccountId, recipe, request.OutputMaxStack <= 0 ? 200 : request.OutputMaxStack, request.Capacity <= 0 ? 40 : request.Capacity);
-                _progressionStore.GrantExperience(request.AccountId, "crafting", Math.Max(5, recipe.OutputQuantity * 5));
-                return Results.Json(new CraftingResultSnapshot(true, $"Crafted {recipe.OutputQuantity} {recipe.OutputItemId}.", request.AccountId, recipe.RecipeId, inventory));
+                var inventory = _inventoryStore.Craft(request.CharacterId, recipe, request.OutputMaxStack <= 0 ? 200 : request.OutputMaxStack, request.Capacity <= 0 ? 40 : request.Capacity);
+                _progressionStore.GrantExperience(request.CharacterId, "crafting", Math.Max(5, recipe.OutputQuantity * 5));
+                return Results.Json(new CraftingResultSnapshot(true, $"Crafted {recipe.OutputQuantity} {recipe.OutputItemId}.", request.CharacterId, recipe.RecipeId, inventory));
             }
             catch (Exception ex)
             {
-                var snapshot = _inventoryStore.GetInventory(request.AccountId, request.Capacity <= 0 ? 40 : request.Capacity);
-                return Results.BadRequest(new CraftingResultSnapshot(false, ex.Message, request.AccountId, request.RecipeId, snapshot));
+                var snapshot = _inventoryStore.GetInventory(request.CharacterId, request.Capacity <= 0 ? 40 : request.Capacity);
+                return Results.BadRequest(new CraftingResultSnapshot(false, ex.Message, request.CharacterId, request.RecipeId, snapshot));
             }
         });
-        app.MapGet("/api/progression/{accountId}", (string accountId) =>
+        app.MapGet("/api/progression/{characterId:long}", (ulong characterId) =>
         {
             try
             {
-                return Results.Json(_progressionStore.Get(accountId));
+                return Results.Json(_progressionStore.Get(characterId));
             }
             catch (Exception ex)
             {
@@ -274,7 +339,7 @@ public sealed class ManagementDashboardHost
 
             try
             {
-                return Results.Json(_progressionStore.GrantExperience(request.AccountId, request.TrackId, request.Experience));
+                return Results.Json(_progressionStore.GrantExperience(request.CharacterId, request.TrackId, request.Experience));
             }
             catch (Exception ex)
             {
@@ -285,14 +350,14 @@ public sealed class ManagementDashboardHost
         app.MapPost("/api/combat/ensure", async (HttpContext context) =>
         {
             var request = await JsonSerializer.DeserializeAsync<CombatEnsureRequest>(context.Request.Body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }, context.RequestAborted).ConfigureAwait(false);
-            if (request is null || string.IsNullOrWhiteSpace(request.AccountId))
+            if (request is null || request.CharacterId == 0)
             {
-                return Results.BadRequest(new { error = "accountId is required." });
+                return Results.BadRequest(new { error = "characterId is required." });
             }
 
             try
             {
-                return Results.Json(_combatStore.EnsureCombatant(request.AccountId.Trim()));
+                return Results.Json(_combatStore.EnsureCombatant(request.CharacterId));
             }
             catch (Exception ex)
             {
@@ -302,25 +367,25 @@ public sealed class ManagementDashboardHost
         app.MapPost("/api/combat/attack", async (HttpContext context) =>
         {
             var request = await JsonSerializer.DeserializeAsync<CombatAttackRequest>(context.Request.Body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }, context.RequestAborted).ConfigureAwait(false);
-            if (request is null || string.IsNullOrWhiteSpace(request.AttackerAccountId) || string.IsNullOrWhiteSpace(request.TargetAccountId))
+            if (request is null || request.AttackerCharacterId == 0 || request.TargetCharacterId == 0)
             {
-                return Results.BadRequest(new { error = "attackerAccountId and targetAccountId are required." });
+                return Results.BadRequest(new { error = "attackerCharacterId and targetCharacterId are required." });
             }
 
             try
             {
-                return Results.Json(_combatStore.Attack(request.AttackerAccountId.Trim(), request.TargetAccountId.Trim(), request.BaseDamage <= 0 ? 10 : request.BaseDamage));
+                return Results.Json(_combatStore.Attack(request.AttackerCharacterId, request.TargetCharacterId, request.BaseDamage <= 0 ? 10 : request.BaseDamage));
             }
             catch (Exception ex)
             {
                 return Results.BadRequest(new { error = ex.Message });
             }
         });
-        app.MapGet("/api/reputation/{accountId}", (string accountId) =>
+        app.MapGet("/api/reputation/{characterId:long}", (ulong characterId) =>
         {
             try
             {
-                return Results.Json(_reputationStore.GetProfile(accountId));
+                return Results.Json(_reputationStore.GetProfile(characterId));
             }
             catch (Exception ex)
             {
@@ -330,15 +395,15 @@ public sealed class ManagementDashboardHost
         app.MapPost("/api/reputation/award", async (HttpContext context) =>
         {
             var request = await JsonSerializer.DeserializeAsync<ReputationAwardRequest>(context.Request.Body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }, context.RequestAborted).ConfigureAwait(false);
-            if (request is null || string.IsNullOrWhiteSpace(request.AccountId) || string.IsNullOrWhiteSpace(request.FactionId))
+            if (request is null || request.CharacterId == 0 || string.IsNullOrWhiteSpace(request.FactionId))
             {
-                return Results.BadRequest(new { error = "accountId and factionId are required." });
+                return Results.BadRequest(new { error = "characterId and factionId are required." });
             }
 
             try
             {
                 return Results.Json(_reputationStore.Award(
-                    request.AccountId.Trim(),
+                    request.CharacterId,
                     request.FactionId.Trim(),
                     request.Amount,
                     string.IsNullOrWhiteSpace(request.Reason) ? "manual adjustment" : request.Reason.Trim(),
@@ -349,11 +414,11 @@ public sealed class ManagementDashboardHost
                 return Results.BadRequest(new { error = ex.Message });
             }
         });
-        app.MapGet("/api/quests/{accountId}", (string accountId) =>
+        app.MapGet("/api/quests/{characterId:long}", (long characterId) =>
         {
             try
             {
-                return Results.Json(_questStore.GetBoard(accountId));
+                return Results.Json(_questStore.GetBoard(unchecked((ulong)characterId)));
             }
             catch (Exception ex)
             {
@@ -380,14 +445,14 @@ public sealed class ManagementDashboardHost
         app.MapPost("/api/quests/progress", async (HttpContext context) =>
         {
             var request = await JsonSerializer.DeserializeAsync<QuestProgressRequest>(context.Request.Body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }, context.RequestAborted).ConfigureAwait(false);
-            if (request is null || string.IsNullOrWhiteSpace(request.AccountId) || string.IsNullOrWhiteSpace(request.QuestId))
+            if (request is null || request.CharacterId == 0 || string.IsNullOrWhiteSpace(request.QuestId))
             {
-                return Results.BadRequest(new { error = "accountId and questId are required." });
+                return Results.BadRequest(new { error = "characterId and questId are required." });
             }
 
             try
             {
-                return Results.Json(_questStore.RecordProgress(request.AccountId.Trim(), request.QuestId.Trim(), request.Amount));
+                return Results.Json(_questStore.RecordProgress(request.CharacterId, request.QuestId.Trim(), request.Amount));
             }
             catch (Exception ex)
             {
@@ -397,14 +462,14 @@ public sealed class ManagementDashboardHost
         app.MapPost("/api/quests/action", async (HttpContext context) =>
         {
             var request = await JsonSerializer.DeserializeAsync<QuestActionRequest>(context.Request.Body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }, context.RequestAborted).ConfigureAwait(false);
-            if (request is null || string.IsNullOrWhiteSpace(request.AccountId) || string.IsNullOrWhiteSpace(request.ActionId))
+            if (request is null || request.CharacterId == 0 || string.IsNullOrWhiteSpace(request.ActionId))
             {
-                return Results.BadRequest(new { error = "accountId and actionId are required." });
+                return Results.BadRequest(new { error = "characterId and actionId are required." });
             }
 
             try
             {
-                return Results.Json(_questStore.RecordAction(request.AccountId.Trim(), request.ActionId.Trim(), request.Amount));
+                return Results.Json(_questStore.RecordAction(request.CharacterId, request.ActionId.Trim(), request.Amount));
             }
             catch (Exception ex)
             {
@@ -414,22 +479,22 @@ public sealed class ManagementDashboardHost
         app.MapPost("/api/quests/claim", async (HttpContext context) =>
         {
             var request = await JsonSerializer.DeserializeAsync<QuestClaimRequest>(context.Request.Body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }, context.RequestAborted).ConfigureAwait(false);
-            if (request is null || string.IsNullOrWhiteSpace(request.AccountId) || string.IsNullOrWhiteSpace(request.QuestId))
+            if (request is null || request.CharacterId == 0 || string.IsNullOrWhiteSpace(request.QuestId))
             {
-                return Results.BadRequest(new { error = "accountId and questId are required." });
+                return Results.BadRequest(new { error = "characterId and questId are required." });
             }
 
             try
             {
-                var claim = _questStore.Claim(request.AccountId.Trim(), request.QuestId.Trim());
+                var claim = _questStore.Claim(request.CharacterId, request.QuestId.Trim());
                 if (claim.AwardedExperience > 0)
                 {
-                    _progressionStore.GrantExperience(claim.AccountId, "adventuring", claim.AwardedExperience);
+                    _progressionStore.GrantExperience(claim.CharacterId, "adventuring", claim.AwardedExperience);
                 }
 
                 if (!string.IsNullOrWhiteSpace(claim.AwardedReputationFaction) && claim.AwardedReputationAmount != 0)
                 {
-                    _reputationStore.Award(claim.AccountId, claim.AwardedReputationFaction, claim.AwardedReputationAmount, $"Quest reward: {claim.QuestId}", "quest-system");
+                    _reputationStore.Award(claim.CharacterId, claim.AwardedReputationFaction, claim.AwardedReputationAmount, $"Quest reward: {claim.QuestId}", "quest-system");
                 }
 
                 return Results.Json(claim);
@@ -439,11 +504,11 @@ public sealed class ManagementDashboardHost
                 return Results.BadRequest(new { error = ex.Message });
             }
         });
-        app.MapGet("/api/world-events/{accountId}", (string accountId) =>
+        app.MapGet("/api/world-events/{characterId:long}", (long characterId) =>
         {
             try
             {
-                return Results.Json(_worldEventStore.GetBoard(accountId));
+                return Results.Json(_worldEventStore.GetBoard(unchecked((ulong)characterId)));
             }
             catch (Exception ex)
             {
@@ -487,14 +552,14 @@ public sealed class ManagementDashboardHost
         app.MapPost("/api/world-events/contribute", async (HttpContext context) =>
         {
             var request = await JsonSerializer.DeserializeAsync<WorldEventContributionRequest>(context.Request.Body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }, context.RequestAborted).ConfigureAwait(false);
-            if (request is null || string.IsNullOrWhiteSpace(request.EventId) || string.IsNullOrWhiteSpace(request.AccountId))
+            if (request is null || string.IsNullOrWhiteSpace(request.EventId) || request.CharacterId == 0)
             {
-                return Results.BadRequest(new { error = "eventId and accountId are required." });
+                return Results.BadRequest(new { error = "eventId and characterId are required." });
             }
 
             try
             {
-                return Results.Json(_worldEventStore.AddContribution(request.EventId.Trim(), request.AccountId.Trim(), request.Amount));
+                return Results.Json(_worldEventStore.AddContribution(request.EventId.Trim(), request.CharacterId, request.Amount));
             }
             catch (Exception ex)
             {
@@ -504,22 +569,22 @@ public sealed class ManagementDashboardHost
         app.MapPost("/api/world-events/claim", async (HttpContext context) =>
         {
             var request = await JsonSerializer.DeserializeAsync<WorldEventClaimRequest>(context.Request.Body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }, context.RequestAborted).ConfigureAwait(false);
-            if (request is null || string.IsNullOrWhiteSpace(request.EventId) || string.IsNullOrWhiteSpace(request.AccountId))
+            if (request is null || string.IsNullOrWhiteSpace(request.EventId) || request.CharacterId == 0)
             {
-                return Results.BadRequest(new { error = "eventId and accountId are required." });
+                return Results.BadRequest(new { error = "eventId and characterId are required." });
             }
 
             try
             {
-                var claim = _worldEventStore.Claim(request.EventId.Trim(), request.AccountId.Trim());
+                var claim = _worldEventStore.Claim(request.EventId.Trim(), request.CharacterId);
                 if (claim.AwardedExperience > 0)
                 {
-                    _progressionStore.GrantExperience(claim.AccountId, "adventuring", claim.AwardedExperience);
+                    _progressionStore.GrantExperience(claim.CharacterId, "adventuring", claim.AwardedExperience);
                 }
 
                 if (!string.IsNullOrWhiteSpace(claim.AwardedReputationFaction) && claim.AwardedReputationAmount != 0)
                 {
-                    _reputationStore.Award(claim.AccountId, claim.AwardedReputationFaction, claim.AwardedReputationAmount, $"World event reward: {claim.EventId}", "world-event-system");
+                    _reputationStore.Award(claim.CharacterId, claim.AwardedReputationFaction, claim.AwardedReputationAmount, $"World event reward: {claim.EventId}", "world-event-system");
                 }
 
                 return Results.Json(claim);
@@ -551,11 +616,11 @@ public sealed class ManagementDashboardHost
                 return Results.BadRequest(new { error = ex.Message });
             }
         });
-        app.MapGet("/api/invasions/{accountId}", (string accountId) =>
+        app.MapGet("/api/invasions/{characterId:long}", (long characterId) =>
         {
             try
             {
-                return Results.Json(_invasionStore.GetBoard(accountId));
+                return Results.Json(_invasionStore.GetBoard(unchecked((ulong)characterId)));
             }
             catch (Exception ex)
             {
@@ -599,14 +664,14 @@ public sealed class ManagementDashboardHost
         app.MapPost("/api/invasions/record-kill", async (HttpContext context) =>
         {
             var request = await JsonSerializer.DeserializeAsync<InvasionRecordKillRequest>(context.Request.Body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }, context.RequestAborted).ConfigureAwait(false);
-            if (request is null || string.IsNullOrWhiteSpace(request.InvasionId) || string.IsNullOrWhiteSpace(request.AccountId))
+            if (request is null || string.IsNullOrWhiteSpace(request.InvasionId) || request.CharacterId == 0)
             {
-                return Results.BadRequest(new { error = "invasionId and accountId are required." });
+                return Results.BadRequest(new { error = "invasionId and characterId are required." });
             }
 
             try
             {
-                return Results.Json(_invasionStore.RecordKill(request.InvasionId.Trim(), request.AccountId.Trim(), request.Kills));
+                return Results.Json(_invasionStore.RecordKill(request.InvasionId.Trim(), request.CharacterId, request.Kills));
             }
             catch (Exception ex)
             {
@@ -616,16 +681,16 @@ public sealed class ManagementDashboardHost
         app.MapPost("/api/invasions/claim", async (HttpContext context) =>
         {
             var request = await JsonSerializer.DeserializeAsync<InvasionClaimRequest>(context.Request.Body, new JsonSerializerOptions { PropertyNameCaseInsensitive = true }, context.RequestAborted).ConfigureAwait(false);
-            if (request is null || string.IsNullOrWhiteSpace(request.InvasionId) || string.IsNullOrWhiteSpace(request.AccountId))
+            if (request is null || string.IsNullOrWhiteSpace(request.InvasionId) || request.CharacterId == 0)
             {
-                return Results.BadRequest(new { error = "invasionId and accountId are required." });
+                return Results.BadRequest(new { error = "invasionId and characterId are required." });
             }
 
             try
             {
-                var claim = _invasionStore.Claim(request.InvasionId.Trim(), request.AccountId.Trim());
-                _progressionStore.GrantExperience(claim.AccountId, "combat", claim.AwardedExperience);
-                _reputationStore.Award(claim.AccountId, claim.AwardedReputationFaction, claim.AwardedReputationAmount, $"Invasion reward: {claim.InvasionId}", "invasion-system");
+                var claim = _invasionStore.Claim(request.InvasionId.Trim(), request.CharacterId);
+                _progressionStore.GrantExperience(claim.CharacterId, "combat", claim.AwardedExperience);
+                _reputationStore.Award(claim.CharacterId, claim.AwardedReputationFaction, claim.AwardedReputationAmount, $"Invasion reward: {claim.InvasionId}", "invasion-system");
                 return Results.Json(claim);
             }
             catch (Exception ex)
@@ -725,6 +790,571 @@ public sealed class ManagementDashboardHost
     }
 
     private string BuildHtml()
+    {
+        var html = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>MMO Live Ops</title>
+  <style>
+    :root {
+      --bg: #09131a;
+      --bg2: #101d27;
+      --panel: rgba(14, 26, 36, 0.78);
+      --panel-strong: rgba(10, 20, 29, 0.92);
+      --panel-border: rgba(138, 202, 255, 0.14);
+      --text: #ecf6ff;
+      --muted: #8aa3b8;
+      --cyan: #55d6ff;
+      --blue: #59a7ff;
+      --green: #5ee2a0;
+      --amber: #ffbf69;
+      --red: #ff7f7f;
+      --shadow: 0 24px 80px rgba(0,0,0,0.34);
+    }
+
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      color: var(--text);
+      font-family: "Segoe UI", Inter, system-ui, sans-serif;
+      background:
+        radial-gradient(circle at top left, rgba(85,214,255,0.10) 0, transparent 28%),
+        radial-gradient(circle at top right, rgba(89,167,255,0.10) 0, transparent 22%),
+        linear-gradient(180deg, var(--bg) 0%, var(--bg2) 100%);
+      min-height: 100vh;
+    }
+
+    .shell {
+      width: min(1500px, calc(100vw - 32px));
+      margin: 0 auto;
+      padding: 24px 0 32px;
+      display: grid;
+      gap: 16px;
+    }
+
+    .card {
+      background: var(--panel);
+      border: 1px solid var(--panel-border);
+      border-radius: 24px;
+      box-shadow: var(--shadow);
+      backdrop-filter: blur(18px);
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.35fr) minmax(320px, 0.65fr);
+      gap: 16px;
+    }
+
+    .hero-main, .hero-side {
+      padding: 22px;
+    }
+
+    .eyebrow {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.14em;
+      font-size: 0.76rem;
+      color: var(--cyan);
+      margin-bottom: 12px;
+    }
+
+    h1 {
+      margin: 0;
+      font-size: clamp(2.4rem, 5vw, 4.6rem);
+      line-height: 0.92;
+      letter-spacing: -0.05em;
+      max-width: 10ch;
+    }
+
+    .sub {
+      color: var(--muted);
+      max-width: 74ch;
+      margin-top: 14px;
+      font-size: 1rem;
+      line-height: 1.55;
+    }
+
+    .hero-actions, .tool-row {
+      display: flex;
+      gap: 10px;
+      flex-wrap: wrap;
+      margin-top: 18px;
+    }
+
+    .btn, .pill {
+      display: inline-flex;
+      align-items: center;
+      justify-content: center;
+      gap: 8px;
+      padding: 10px 14px;
+      border-radius: 999px;
+      border: 1px solid rgba(138,202,255,0.16);
+      text-decoration: none;
+      color: var(--text);
+      background: rgba(255,255,255,0.04);
+    }
+
+    .btn.primary {
+      background: linear-gradient(135deg, rgba(85,214,255,0.20), rgba(89,167,255,0.18));
+      border-color: rgba(85,214,255,0.32);
+    }
+
+    .signal-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .signal {
+      border: 1px solid rgba(138,202,255,0.10);
+      border-radius: 18px;
+      padding: 14px;
+      background: rgba(255,255,255,0.03);
+    }
+
+    .signal-label {
+      color: var(--muted);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      margin-bottom: 10px;
+    }
+
+    .signal-value {
+      font-size: clamp(1.6rem, 3vw, 2.5rem);
+      line-height: 1;
+      font-weight: 700;
+    }
+
+    .signal-foot {
+      color: var(--muted);
+      font-size: 0.9rem;
+      margin-top: 10px;
+    }
+
+    .layout {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 380px;
+      gap: 16px;
+    }
+
+    .stack {
+      display: grid;
+      gap: 16px;
+    }
+
+    .section {
+      padding: 20px;
+    }
+
+    .section-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: end;
+      gap: 12px;
+      margin-bottom: 16px;
+    }
+
+    .section-title {
+      margin: 0;
+      font-size: 1.15rem;
+      letter-spacing: -0.03em;
+    }
+
+    .section-kicker {
+      color: var(--muted);
+      font-size: 0.85rem;
+    }
+
+    .ops-grid {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .ops-tile {
+      border: 1px solid rgba(138,202,255,0.10);
+      border-radius: 18px;
+      padding: 14px;
+      background: rgba(255,255,255,0.03);
+      display: grid;
+      gap: 8px;
+    }
+
+    .ops-tile strong {
+      font-size: 1rem;
+      letter-spacing: -0.02em;
+    }
+
+    .muted {
+      color: var(--muted);
+      font-size: 0.92rem;
+      line-height: 1.45;
+    }
+
+    .zone-grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+      gap: 12px;
+    }
+
+    .zone-card {
+      border: 1px solid rgba(138,202,255,0.10);
+      border-radius: 18px;
+      padding: 16px;
+      background: rgba(255,255,255,0.03);
+      display: grid;
+      gap: 10px;
+    }
+
+    .zone-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: start;
+    }
+
+    .zone-name {
+      margin: 0;
+      font-size: 1.08rem;
+      letter-spacing: -0.02em;
+    }
+
+    .state-pill {
+      border-radius: 999px;
+      padding: 6px 10px;
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.1em;
+      border: 1px solid rgba(138,202,255,0.12);
+      color: var(--cyan);
+      background: rgba(85,214,255,0.08);
+    }
+
+    .zone-metrics {
+      display: grid;
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 10px 14px;
+    }
+
+    .metric-label {
+      color: var(--muted);
+      font-size: 0.78rem;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      margin-bottom: 4px;
+    }
+
+    .metric-value {
+      font-size: 1rem;
+      font-weight: 600;
+    }
+
+    .session-list {
+      display: grid;
+      gap: 10px;
+      max-height: 720px;
+      overflow: auto;
+      padding-right: 4px;
+    }
+
+    .session-card {
+      border: 1px solid rgba(138,202,255,0.10);
+      border-radius: 18px;
+      padding: 14px;
+      background: rgba(255,255,255,0.03);
+      display: grid;
+      gap: 8px;
+    }
+
+    .session-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+
+    .session-id {
+      color: var(--muted);
+      font-size: 0.78rem;
+      word-break: break-all;
+    }
+
+    .session-meta {
+      display: grid;
+      grid-template-columns: 1fr auto;
+      gap: 6px 10px;
+      color: var(--muted);
+      font-size: 0.9rem;
+    }
+
+    .incident-list {
+      display: grid;
+      gap: 10px;
+    }
+
+    .incident {
+      border: 1px solid rgba(138,202,255,0.10);
+      border-radius: 18px;
+      padding: 14px;
+      background: rgba(255,255,255,0.03);
+      display: grid;
+      gap: 6px;
+    }
+
+    .incident strong {
+      font-size: 0.96rem;
+    }
+
+    .status-good { color: var(--green); }
+    .status-warn { color: var(--amber); }
+    .status-bad { color: var(--red); }
+
+    @media (max-width: 1180px) {
+      .hero, .layout { grid-template-columns: 1fr; }
+    }
+
+    @media (max-width: 760px) {
+      .signal-grid, .ops-grid, .zone-metrics { grid-template-columns: 1fr; }
+      .shell { width: min(100vw - 20px, 1500px); }
+    }
+  </style>
+</head>
+<body>
+  <div class="shell">
+    <section class="hero">
+      <article class="card hero-main">
+        <div class="eyebrow">MMO Live Ops Command</div>
+        <h1>One view for world health, zone load, and intervention.</h1>
+        <div class="sub">
+          This surface is designed for live operations: see fleet state, spot transfer stress, inspect active sessions, and jump directly into gameplay admin tools without leaving the dashboard.
+        </div>
+        <div class="hero-actions">
+          <a class="btn primary" href="/map">Open World Map</a>
+          <a class="btn" href="/tools">Tool Directory</a>
+          <a class="btn" href="/tools/moderation">Moderation</a>
+          <a class="btn" href="/tools/invasions">Invasions</a>
+        </div>
+      </article>
+      <aside class="card hero-side">
+        <div class="eyebrow">Live Signal</div>
+        <div class="signal-grid">
+          <div class="signal">
+            <div class="signal-label">Online Sessions</div>
+            <div class="signal-value" id="sessionCount">0</div>
+            <div class="signal-foot" id="lastUpdated">Awaiting snapshot</div>
+          </div>
+          <div class="signal">
+            <div class="signal-label">Zone Fleet</div>
+            <div class="signal-value" id="zoneCount">0</div>
+            <div class="signal-foot">Active runtime surfaces</div>
+          </div>
+          <div class="signal">
+            <div class="signal-label">Gateway Logins</div>
+            <div class="signal-value" id="successfulLogins">0</div>
+            <div class="signal-foot">Port <span id="gatewayPort">-</span></div>
+          </div>
+          <div class="signal">
+            <div class="signal-label">Transfers</div>
+            <div class="signal-value" id="transferCount">0</div>
+            <div class="signal-foot">Cross-zone handoffs</div>
+          </div>
+          <div class="signal">
+            <div class="signal-label">Ghost Entities</div>
+            <div class="signal-value" id="ghostCount">0</div>
+            <div class="signal-foot">Border overlap replicas</div>
+          </div>
+          <div class="signal">
+            <div class="signal-label">Gateway Errors</div>
+            <div class="signal-value" id="gatewayErrors">0</div>
+            <div class="signal-foot">Attempts <span id="gatewayAttempts">0</span></div>
+          </div>
+        </div>
+      </aside>
+    </section>
+
+    <section class="layout">
+      <div class="stack">
+        <article class="card section">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">Operations Board</div>
+              <h2 class="section-title">Rapid intervention lanes</h2>
+            </div>
+          </div>
+          <div class="ops-grid">
+            <a class="ops-tile btn" href="/tools/moderation"><strong>Moderation</strong><span class="muted">Mute, ban, kick, and review recent account actions.</span></a>
+            <a class="ops-tile btn" href="/tools/inventory"><strong>Inventory</strong><span class="muted">Inspect accounts and perform add, move, split, and remove actions.</span></a>
+            <a class="ops-tile btn" href="/tools/crafting"><strong>Crafting</strong><span class="muted">Manage recipes and execute craft transactions against persisted inventory.</span></a>
+            <a class="ops-tile btn" href="/tools/progression"><strong>Progression</strong><span class="muted">Grant experience and inspect character growth tracks.</span></a>
+            <a class="ops-tile btn" href="/tools/combat"><strong>Combat</strong><span class="muted">Spawn combatants, simulate attacks, and review action logs.</span></a>
+            <a class="ops-tile btn" href="/tools/quests"><strong>Quests</strong><span class="muted">Manage quest definitions, progress state, and reward claims.</span></a>
+            <a class="ops-tile btn" href="/tools/world-events"><strong>World Events</strong><span class="muted">Advance event state, inspect contributions, and manage rewards.</span></a>
+            <a class="ops-tile btn" href="/tools/invasions"><strong>Invasions</strong><span class="muted">Control invasion waves and kill-credit payouts.</span></a>
+          </div>
+        </article>
+
+        <article class="card section">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">Zone Fleet</div>
+              <h2 class="section-title">Runtime topology and load</h2>
+            </div>
+            <a class="btn" href="/map">Open spatial view</a>
+          </div>
+          <div class="zone-grid" id="zones"></div>
+        </article>
+      </div>
+
+      <div class="stack">
+        <article class="card section">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">Live Incidents</div>
+              <h2 class="section-title">Automatic runtime callouts</h2>
+            </div>
+          </div>
+          <div class="incident-list" id="incidents"></div>
+        </article>
+
+        <article class="card section">
+          <div class="section-head">
+            <div>
+              <div class="section-kicker">Active Sessions</div>
+              <h2 class="section-title">Player control plane</h2>
+            </div>
+          </div>
+          <div class="session-list" id="sessions"></div>
+        </article>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const fmt = new Intl.NumberFormat();
+
+    function timeOrActive(value) {
+      return value ? new Date(value).toLocaleTimeString() : 'Active';
+    }
+
+    function buildIncidents(snapshot) {
+      const incidents = [];
+      if (snapshot.gateway.errors > 0) {
+        incidents.push({ title: 'Gateway error activity', detail: `${fmt.format(snapshot.gateway.errors)} errors recorded on TCP ${snapshot.gateway.port}.`, severity: 'bad' });
+      }
+
+      snapshot.zones.forEach(zone => {
+        if (zone.lifecycleState.toLowerCase() !== 'running') {
+          incidents.push({ title: `${zone.name} not running`, detail: `Lifecycle state is ${zone.lifecycleState}. Last change ${new Date(zone.lastStateChangeUtc).toLocaleTimeString()}.`, severity: 'warn' });
+        }
+        if (zone.activePlayers === 0 && zone.lifecycleState.toLowerCase() === 'running') {
+          incidents.push({ title: `${zone.name} running idle`, detail: `No active players. Idle since ${timeOrActive(zone.idleSinceUtc)}.`, severity: 'warn' });
+        }
+        if (zone.totalTransfersInitiated > 0 && zone.activePlayers > 0) {
+          incidents.push({ title: `${zone.name} transfer pressure`, detail: `${fmt.format(zone.totalTransfersInitiated)} transfers initiated with ${fmt.format(zone.activePlayers)} active players.`, severity: 'good' });
+        }
+        if (zone.activeGhosts > 0) {
+          incidents.push({ title: `${zone.name} seam overlap`, detail: `${fmt.format(zone.activeGhosts)} ghosts active near borders.`, severity: 'good' });
+        }
+      });
+
+      if (snapshot.sessions.length === 0) {
+        incidents.push({ title: 'No active sessions', detail: 'Gateway is up but no players are currently attached.', severity: 'warn' });
+      }
+
+      return incidents.slice(0, 8);
+    }
+
+    function render(snapshot) {
+      document.getElementById('sessionCount').textContent = fmt.format(snapshot.sessions.length);
+      document.getElementById('zoneCount').textContent = fmt.format(snapshot.zones.length);
+      document.getElementById('successfulLogins').textContent = fmt.format(snapshot.gateway.successfulLogins);
+      document.getElementById('transferCount').textContent = fmt.format(snapshot.zones.reduce((sum, zone) => sum + zone.totalTransfersInitiated, 0));
+      document.getElementById('ghostCount').textContent = fmt.format(snapshot.zones.reduce((sum, zone) => sum + zone.activeGhosts, 0));
+      document.getElementById('gatewayPort').textContent = snapshot.gateway.port;
+      document.getElementById('gatewayErrors').textContent = fmt.format(snapshot.gateway.errors);
+      document.getElementById('gatewayAttempts').textContent = fmt.format(snapshot.gateway.connectionAttempts);
+      document.getElementById('lastUpdated').textContent = `Updated ${new Date(snapshot.generatedAtUtc).toLocaleTimeString()}`;
+
+      document.getElementById('zones').innerHTML = snapshot.zones.map(zone => `
+        <section class="zone-card">
+          <div class="zone-top">
+            <div>
+              <div class="section-kicker">Zone ${zone.zoneId}</div>
+              <h3 class="zone-name">${zone.name}</h3>
+            </div>
+            <div class="state-pill">${zone.lifecycleState}</div>
+          </div>
+          <div class="muted">${zone.runtimeMode} · TCP ${zone.tcpPort} · UDP ${zone.udpPort}</div>
+          <div class="zone-metrics">
+            <div><div class="metric-label">Players</div><div class="metric-value">${fmt.format(zone.activePlayers)}</div></div>
+            <div><div class="metric-label">Ghosts</div><div class="metric-value">${fmt.format(zone.activeGhosts)}</div></div>
+            <div><div class="metric-label">Transfers</div><div class="metric-value">${fmt.format(zone.totalTransfersInitiated)}</div></div>
+            <div><div class="metric-label">Tick</div><div class="metric-value">${fmt.format(zone.tick)}</div></div>
+            <div><div class="metric-label">Bounds</div><div class="metric-value">X ${zone.minX.toFixed(0)}-${zone.maxX.toFixed(0)}</div></div>
+            <div><div class="metric-label">Depth</div><div class="metric-value">Z ${zone.minZ.toFixed(0)}-${zone.maxZ.toFixed(0)}</div></div>
+            <div><div class="metric-label">AOI</div><div class="metric-value">${zone.aoiRadius.toFixed(1)}</div></div>
+            <div><div class="metric-label">Prewarm</div><div class="metric-value">${zone.prewarmMargin.toFixed(1)}</div></div>
+          </div>
+          <div class="muted">Last change ${new Date(zone.lastStateChangeUtc).toLocaleTimeString()} · Idle ${timeOrActive(zone.idleSinceUtc)}</div>
+        </section>
+      `).join('');
+
+      document.getElementById('sessions').innerHTML = snapshot.sessions.map(session => {
+        const pending = session.pendingAttachments.length === 0
+          ? 'No pending zone attachments.'
+          : session.pendingAttachments.map(p => `Zone ${p.zoneId} → (${p.spawnX.toFixed(1)}, ${p.spawnZ.toFixed(1)})`).join(' · ');
+
+        return `
+          <section class="session-card">
+            <div class="session-top">
+              <strong>P${session.playerId}</strong>
+              <div class="pill">Zone ${session.currentZoneId}</div>
+            </div>
+            <div class="session-id">${session.sessionId}</div>
+            <div class="session-meta">
+              <span>Account</span><span>${session.accountId}</span>
+              <span>Position</span><span>${session.positionX.toFixed(2)}, ${session.positionY.toFixed(2)}, ${session.positionZ.toFixed(2)}</span>
+              <span>TCP / UDP</span><span>${new Date(session.lastTcpSeenUtc).toLocaleTimeString()} · ${new Date(session.lastUdpSeenUtc).toLocaleTimeString()}</span>
+              <span>Reconnect</span><span>${session.disconnectGraceDeadlineUtc ? `Grace until ${new Date(session.disconnectGraceDeadlineUtc).toLocaleTimeString()}` : 'Healthy'}</span>
+              <span>Pending</span><span>${pending}</span>
+            </div>
+          </section>
+        `;
+      }).join('');
+
+      const incidents = buildIncidents(snapshot);
+      document.getElementById('incidents').innerHTML = incidents.map(incident => `
+        <section class="incident">
+          <strong class="status-${incident.severity}">${incident.title}</strong>
+          <div class="muted">${incident.detail}</div>
+        </section>
+      `).join('');
+    }
+
+    async function refresh() {
+      const response = await fetch('/api/dashboard', { cache: 'no-store' });
+      const data = await response.json();
+      render(data);
+    }
+
+    refresh();
+    setInterval(refresh, 1500);
+  </script>
+</body>
+</html>
+""";
+
+        return html;
+    }
+
+    private string BuildHtmlLegacy()
     {
         var html = """
 <!DOCTYPE html>
@@ -1188,6 +1818,256 @@ public sealed class ManagementDashboardHost
 
     private string BuildDefinitionEditorPage(string title, string section)
     {
+        var html = $$"""
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{title}} Tool</title>
+  <style>
+    body { margin: 0; font-family: "Segoe UI", Inter, system-ui, sans-serif; background: #101d27; color: #ecf6ff; }
+    .wrap { width: min(1280px, calc(100vw - 32px)); margin: 0 auto; padding: 24px 0 36px; display: grid; gap: 16px; }
+    .card { background: rgba(14,26,36,0.82); border: 1px solid rgba(138,202,255,0.12); border-radius: 22px; padding: 18px; box-shadow: 0 24px 80px rgba(0,0,0,0.28); }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .layout { display: grid; grid-template-columns: 360px minmax(0, 1fr); gap: 16px; }
+    .btn { display: inline-flex; align-items: center; border-radius: 999px; border: 1px solid rgba(138,202,255,0.16); background: rgba(255,255,255,0.04); color: #ecf6ff; padding: 9px 14px; text-decoration: none; cursor: pointer; }
+    .btn.primary { background: linear-gradient(135deg, rgba(85,214,255,0.20), rgba(89,167,255,0.18)); }
+    .muted { color: #8aa3b8; font-size: 0.94rem; line-height: 1.5; }
+    .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 12px; }
+    .field { display: grid; gap: 6px; }
+    .field.full { grid-column: 1 / -1; }
+    label { color: #8aa3b8; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.08em; }
+    input { padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(138,202,255,0.14); background: rgba(255,255,255,0.03); color: #ecf6ff; }
+    table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 0.93rem; }
+    th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid rgba(138,202,255,0.08); vertical-align: top; }
+    th { color: #8aa3b8; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; }
+    .pill { display: inline-flex; align-items: center; padding: 5px 9px; border-radius: 999px; border: 1px solid rgba(138,202,255,0.14); color: #55d6ff; font-size: 0.78rem; }
+    .status { color: #8aa3b8; }
+    tr.is-selected { background: rgba(85,214,255,0.08); }
+    @media (max-width: 980px) { .layout { grid-template-columns: 1fr; } .form-grid { grid-template-columns: 1fr; } }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="card">
+      <div class="pill">{{title}}</div>
+      <h1 style="margin:10px 0 8px;">{{title}} Tool</h1>
+      <p class="muted">This tool now uses structured forms instead of raw JSON. Select an existing row to edit it, or start a new one and save back through <code>/api/gameplay-definitions</code>.</p>
+      <div class="row">
+        <a class="btn" href="/">Dashboard</a>
+        <a class="btn" href="/tools">Tools Home</a>
+        <a class="btn" href="/tools/items">Items</a>
+        <a class="btn" href="/tools/skills">Skills</a>
+        <a class="btn" href="/tools/resources">Resources</a>
+        <a class="btn" href="/tools/nodes">Nodes</a>
+        <a class="btn" href="/tools/zones">Zones</a>
+      </div>
+    </section>
+
+    <section class="layout">
+      <article class="card">
+        <div class="row" style="justify-content:space-between; margin-bottom:12px;">
+          <strong>Editor</strong>
+          <span id="status" class="status">Loading…</span>
+        </div>
+        <div id="formFields" class="form-grid"></div>
+        <div class="row" style="margin-top:14px;">
+          <button id="newBtn" class="btn">New Row</button>
+          <button id="saveBtn" class="btn primary">Save Row</button>
+          <button id="deleteBtn" class="btn">Delete Selected</button>
+          <button id="reloadBtn" class="btn">Reload</button>
+        </div>
+      </article>
+
+      <article class="card">
+        <div class="row" style="justify-content:space-between;">
+          <strong>Rows</strong>
+          <span id="count" class="status">0 rows</span>
+        </div>
+        <table>
+          <thead><tr id="tableHead"></tr></thead>
+          <tbody id="tableBody"></tbody>
+        </table>
+      </article>
+    </section>
+  </div>
+  <script>
+    const section = '{{section}}';
+    const status = document.getElementById('status');
+    const count = document.getElementById('count');
+    const formFields = document.getElementById('formFields');
+    const tableHead = document.getElementById('tableHead');
+    const tableBody = document.getElementById('tableBody');
+    let rows = [];
+    let selectedIndex = -1;
+
+    function fieldConfig() {
+      switch (section) {
+        case 'items': return [
+          { key: 'id', label: 'Id', type: 'text' },
+          { key: 'name', label: 'Name', type: 'text' },
+          { key: 'maxStack', label: 'Max Stack', type: 'number' },
+          { key: 'baseWeight', label: 'Base Weight', type: 'number', step: '0.1' }
+        ];
+        case 'skills': return [
+          { key: 'id', label: 'Id', type: 'text' },
+          { key: 'name', label: 'Name', type: 'text' },
+          { key: 'maxValue', label: 'Max Value', type: 'number' }
+        ];
+        case 'resources': return [
+          { key: 'id', label: 'Id', type: 'text' },
+          { key: 'name', label: 'Name', type: 'text' },
+          { key: 'itemId', label: 'Item Id', type: 'text' },
+          { key: 'baseYield', label: 'Base Yield', type: 'number' }
+        ];
+        case 'nodes': return [
+          { key: 'id', label: 'Id', type: 'text' },
+          { key: 'zoneId', label: 'Zone Id', type: 'number' },
+          { key: 'resourceId', label: 'Resource Id', type: 'text' },
+          { key: 'positionX', label: 'Position X', type: 'number', step: '0.1' },
+          { key: 'positionY', label: 'Position Y', type: 'number', step: '0.1' },
+          { key: 'positionZ', label: 'Position Z', type: 'number', step: '0.1' },
+          { key: 'respawnSeconds', label: 'Respawn Seconds', type: 'number' }
+        ];
+        case 'zones': return [
+          { key: 'zoneId', label: 'Zone Id', type: 'number' },
+          { key: 'name', label: 'Name', type: 'text' },
+          { key: 'minX', label: 'Min X', type: 'number', step: '0.1' },
+          { key: 'maxX', label: 'Max X', type: 'number', step: '0.1' },
+          { key: 'minZ', label: 'Min Z', type: 'number', step: '0.1' },
+          { key: 'maxZ', label: 'Max Z', type: 'number', step: '0.1' }
+        ];
+        default: return [];
+      }
+    }
+
+    function createEmptyRow() {
+      const row = {};
+      for (const field of fieldConfig()) {
+        row[field.key] = field.type === 'number' ? 0 : '';
+      }
+      return row;
+    }
+
+    function renderForm(row) {
+      formFields.innerHTML = fieldConfig().map(field => `
+        <div class="field ${field.type === 'text' && field.key === 'name' ? 'full' : ''}">
+          <label for="field_${field.key}">${field.label}</label>
+          <input id="field_${field.key}" type="${field.type}" ${field.step ? `step="${field.step}"` : ''} value="${row[field.key] ?? ''}" />
+        </div>
+      `).join('');
+    }
+
+    function currentRowFromForm() {
+      const row = {};
+      for (const field of fieldConfig()) {
+        const raw = document.getElementById(`field_${field.key}`).value;
+        row[field.key] = field.type === 'number' ? Number(raw || 0) : raw.trim();
+      }
+      return row;
+    }
+
+    function renderTable() {
+      const fields = fieldConfig();
+      tableHead.innerHTML = fields.slice(0, 4).map(field => `<th>${field.label}</th>`).join('');
+      tableBody.innerHTML = rows.map((row, index) => `
+        <tr data-index="${index}" class="${index === selectedIndex ? 'is-selected' : ''}">
+          ${fields.slice(0, 4).map(field => `<td>${row[field.key] ?? ''}</td>`).join('')}
+        </tr>
+      `).join('');
+
+      count.textContent = `${rows.length} row${rows.length === 1 ? '' : 's'}`;
+      tableBody.querySelectorAll('tr').forEach(element => {
+        element.addEventListener('click', () => {
+          selectedIndex = Number(element.dataset.index);
+          renderForm(rows[selectedIndex]);
+          renderTable();
+          status.textContent = `Editing row ${selectedIndex + 1}`;
+        });
+      });
+    }
+
+    async function loadRows() {
+      const response = await fetch('/api/gameplay-definitions', { cache: 'no-store' });
+      const snapshot = await response.json();
+      rows = [...(snapshot[section] || [])];
+      selectedIndex = rows.length > 0 ? 0 : -1;
+      renderForm(selectedIndex >= 0 ? rows[selectedIndex] : createEmptyRow());
+      renderTable();
+      status.textContent = `Loaded ${section} at ${new Date().toLocaleTimeString()}`;
+    }
+
+    async function saveRows() {
+      try {
+        const next = currentRowFromForm();
+        if (selectedIndex >= 0) {
+          rows[selectedIndex] = next;
+        } else {
+          rows.push(next);
+          selectedIndex = rows.length - 1;
+        }
+
+        const currentResponse = await fetch('/api/gameplay-definitions', { cache: 'no-store' });
+        const current = await currentResponse.json();
+        current[section] = rows;
+
+        const saveResponse = await fetch('/api/gameplay-definitions', {
+          method: 'PUT',
+          headers: { 'content-type': 'application/json' },
+          body: JSON.stringify(current)
+        });
+        const result = await saveResponse.json();
+        if (!saveResponse.ok) {
+          throw new Error(result.error || 'Save failed');
+        }
+
+        rows = [...(result[section] || [])];
+        selectedIndex = rows.length === 0 ? -1 : Math.min(selectedIndex, rows.length - 1);
+        renderForm(selectedIndex >= 0 ? rows[selectedIndex] : createEmptyRow());
+        renderTable();
+        status.textContent = `Saved ${section} at ${new Date().toLocaleTimeString()}`;
+      } catch (error) {
+        status.textContent = `Save failed: ${error.message}`;
+      }
+    }
+
+    function newRow() {
+      selectedIndex = -1;
+      renderForm(createEmptyRow());
+      renderTable();
+      status.textContent = `Creating new ${section.slice(0, -1) || 'row'}`;
+    }
+
+    function deleteRow() {
+      if (selectedIndex < 0) {
+        status.textContent = 'No row selected.';
+        return;
+      }
+
+      rows.splice(selectedIndex, 1);
+      selectedIndex = rows.length > 0 ? Math.min(selectedIndex, rows.length - 1) : -1;
+      renderForm(selectedIndex >= 0 ? rows[selectedIndex] : createEmptyRow());
+      renderTable();
+      status.textContent = 'Row removed locally. Save to persist.';
+    }
+
+    document.getElementById('newBtn').addEventListener('click', newRow);
+    document.getElementById('saveBtn').addEventListener('click', () => saveRows().catch(err => status.textContent = err.message));
+    document.getElementById('deleteBtn').addEventListener('click', deleteRow);
+    document.getElementById('reloadBtn').addEventListener('click', () => loadRows().catch(err => status.textContent = err.message));
+
+    loadRows().catch(err => status.textContent = err.message);
+  </script>
+</body>
+</html>
+""";
+
+        return html;
+    }
+
+    private string BuildDefinitionEditorPageLegacy(string title, string section)
+    {
         var exampleRow = section switch
         {
             "items" => """{"id":"fiber","name":"Plant Fiber","maxStack":200,"baseWeight":0.2}""",
@@ -1509,29 +2389,32 @@ public sealed class ManagementDashboardHost
         return html;
     }
 
+    private sealed record AccountCharacterAuthRequest(string AccountName, string Password);
+    private sealed record AccountCharacterCreateRequest(string AccountName, string Password, string CharacterName);
+    private sealed record AccountCharacterSelectRequest(string AccountName, string Password, ulong CharacterId);
     private sealed record ModerationAccountRequest(string AccountId, bool IsMuted, bool IsBanned, string? Reason, string? Actor);
     private sealed record ModerationKickRequest(Guid SessionId, string? Reason, string? Actor);
-    private sealed record InventoryAddRequest(string AccountId, string ItemId, int Quantity, int MaxStack, int Capacity = 40);
-    private sealed record InventoryMoveRequest(string AccountId, int FromSlot, int ToSlot, int Capacity = 40);
-    private sealed record InventorySplitRequest(string AccountId, int FromSlot, int ToSlot, int Quantity, int Capacity = 40);
-    private sealed record InventoryRemoveRequest(string AccountId, int SlotIndex, int Quantity, int Capacity = 40);
-    private sealed record CraftingExecuteRequest(string AccountId, string RecipeId, int OutputMaxStack = 200, int Capacity = 40);
-    private sealed record GrantProgressionRequest(string AccountId, string TrackId, int Experience);
-    private sealed record CombatEnsureRequest(string AccountId);
-    private sealed record CombatAttackRequest(string AttackerAccountId, string TargetAccountId, int BaseDamage = 10);
-    private sealed record ReputationAwardRequest(string AccountId, string FactionId, int Amount, string? Reason, string? Actor);
+    private sealed record InventoryAddRequest(ulong CharacterId, string ItemId, int Quantity, int MaxStack, int Capacity = 40);
+    private sealed record InventoryMoveRequest(ulong CharacterId, int FromSlot, int ToSlot, int Capacity = 40);
+    private sealed record InventorySplitRequest(ulong CharacterId, int FromSlot, int ToSlot, int Quantity, int Capacity = 40);
+    private sealed record InventoryRemoveRequest(ulong CharacterId, int SlotIndex, int Quantity, int Capacity = 40);
+    private sealed record CraftingExecuteRequest(ulong CharacterId, string RecipeId, int OutputMaxStack = 200, int Capacity = 40);
+    private sealed record GrantProgressionRequest(ulong CharacterId, string TrackId, int Experience);
+    private sealed record CombatEnsureRequest(ulong CharacterId);
+    private sealed record CombatAttackRequest(ulong AttackerCharacterId, ulong TargetCharacterId, int BaseDamage = 10);
+    private sealed record ReputationAwardRequest(ulong CharacterId, string FactionId, int Amount, string? Reason, string? Actor);
     private sealed record QuestDefinitionUpsertRequest(QuestDefinitionSnapshot Definition, string? Actor);
-    private sealed record QuestProgressRequest(string AccountId, string QuestId, int Amount = 1);
-    private sealed record QuestActionRequest(string AccountId, string ActionId, int Amount = 1);
-    private sealed record QuestClaimRequest(string AccountId, string QuestId);
+    private sealed record QuestProgressRequest(ulong CharacterId, string QuestId, int Amount = 1);
+    private sealed record QuestActionRequest(ulong CharacterId, string ActionId, int Amount = 1);
+    private sealed record QuestClaimRequest(ulong CharacterId, string QuestId);
     private sealed record WorldEventUpsertRequest(WorldEventSnapshot Event);
     private sealed record WorldEventStateRequest(string EventId, string State);
-    private sealed record WorldEventContributionRequest(string EventId, string AccountId, int Amount = 1);
-    private sealed record WorldEventClaimRequest(string EventId, string AccountId);
+    private sealed record WorldEventContributionRequest(string EventId, ulong CharacterId, int Amount = 1);
+    private sealed record WorldEventClaimRequest(string EventId, ulong CharacterId);
     private sealed record InvasionUpsertRequest(InvasionSnapshot Invasion);
     private sealed record InvasionAdvanceWaveRequest(string InvasionId);
-    private sealed record InvasionRecordKillRequest(string InvasionId, string AccountId, int Kills = 1);
-    private sealed record InvasionClaimRequest(string InvasionId, string AccountId);
+    private sealed record InvasionRecordKillRequest(string InvasionId, ulong CharacterId, int Kills = 1);
+    private sealed record InvasionClaimRequest(string InvasionId, ulong CharacterId);
 
     private string BuildInventoryPage()
     {
@@ -1727,12 +2610,16 @@ public sealed class ManagementDashboardHost
     .wrap { width: min(1220px, calc(100vw - 32px)); margin: 0 auto; padding: 24px 0 36px; display: grid; gap: 16px; }
     .card { background: rgba(255,255,255,0.85); border: 1px solid rgba(61,43,31,0.14); border-radius: 18px; padding: 16px; }
     .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
-    input, textarea { padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(61,43,31,0.2); }
-    textarea { width: 100%; min-height: 150px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; }
+    input, select { padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(61,43,31,0.2); }
     button, a.btn { display: inline-flex; align-items: center; border-radius: 999px; border: 1px solid rgba(61,43,31,0.2); background: #fff; color: #26170f; padding: 8px 14px; text-decoration: none; cursor: pointer; }
     table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.93rem; }
     th, td { text-align: left; padding: 8px; border-bottom: 1px solid rgba(61,43,31,0.1); vertical-align: top; }
     .muted { color: #6a5547; font-size: 0.92rem; }
+    .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .field { display: grid; gap: 6px; }
+    .field.full { grid-column: 1 / -1; }
+    .ingredient-row { display: grid; grid-template-columns: minmax(0, 1fr) 140px auto; gap: 10px; margin-top: 10px; align-items: end; }
+    @media (max-width: 760px) { .form-grid, .ingredient-row { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -1748,8 +2635,20 @@ public sealed class ManagementDashboardHost
     </section>
     <section class="card">
       <h2>Recipe Editor</h2>
-      <div class="muted">Recipe JSON example:</div>
-      <textarea id="recipeJson">{\n  \"recipeId\": \"make-cloth\",\n  \"name\": \"Make Cloth\",\n  \"outputItemId\": \"cloth\",\n  \"outputQuantity\": 1,\n  \"craftSeconds\": 4,\n  \"ingredients\": [\n    { \"itemId\": \"fiber\", \"quantity\": 3 }\n  ]\n}</textarea>
+      <div class="form-grid">
+        <div class="field"><label for="recipeIdInput">Recipe Id</label><input id="recipeIdInput" value="make-cloth" /></div>
+        <div class="field"><label for="recipeNameInput">Name</label><input id="recipeNameInput" value="Make Cloth" /></div>
+        <div class="field"><label for="outputItemIdInput">Output Item Id</label><input id="outputItemIdInput" value="cloth" /></div>
+        <div class="field"><label for="outputQuantityInput">Output Quantity</label><input id="outputQuantityInput" type="number" value="1" /></div>
+        <div class="field"><label for="craftSecondsInput">Craft Seconds</label><input id="craftSecondsInput" type="number" value="4" /></div>
+      </div>
+      <div style="margin-top:12px;">
+        <div class="row" style="justify-content:space-between;">
+          <strong>Ingredients</strong>
+          <button id="addIngredientBtn" type="button">Add Ingredient</button>
+        </div>
+        <div id="ingredients"></div>
+      </div>
       <div class="row">
         <button id="loadRecipes">Reload Recipes</button>
         <button id="saveRecipe">Upsert Recipe</button>
@@ -1775,25 +2674,85 @@ public sealed class ManagementDashboardHost
   </div>
   <script>
     function byId(id) { return document.getElementById(id); }
+    let recipes = [];
 
     function renderRecipes(recipes) {
       byId('recipes').innerHTML = (recipes || []).map(recipe => `
-        <tr>
+        <tr data-recipe-id="${recipe.recipeId}">
           <td>${recipe.recipeId}<br><span class="muted">${recipe.name}</span></td>
           <td>${recipe.outputQuantity} x ${recipe.outputItemId}<br><span class="muted">${recipe.craftSeconds}s</span></td>
           <td>${(recipe.ingredients || []).map(i => `${i.quantity} x ${i.itemId}`).join('<br>')}</td>
         </tr>`).join('');
+
+      byId('recipes').querySelectorAll('tr').forEach(row => {
+        row.addEventListener('click', () => {
+          const recipe = recipes.find(entry => entry.recipeId === row.dataset.recipeId);
+          if (!recipe) {
+            return;
+          }
+
+          fillRecipeForm(recipe);
+          byId('status').textContent = `Loaded recipe ${recipe.recipeId} into the form.`;
+        });
+      });
+    }
+
+    function renderIngredients(ingredients) {
+      byId('ingredients').innerHTML = (ingredients || []).map((ingredient, index) => `
+        <div class="ingredient-row" data-index="${index}">
+          <div class="field">
+            <label>Item Id</label>
+            <input class="ingredient-item" value="${ingredient.itemId || ''}" />
+          </div>
+          <div class="field">
+            <label>Quantity</label>
+            <input class="ingredient-quantity" type="number" value="${ingredient.quantity ?? 1}" />
+          </div>
+          <button class="remove-ingredient" type="button">Remove</button>
+        </div>
+      `).join('');
+
+      byId('ingredients').querySelectorAll('.remove-ingredient').forEach(button => {
+        button.addEventListener('click', () => {
+          button.parentElement.remove();
+        });
+      });
+    }
+
+    function fillRecipeForm(recipe) {
+      byId('recipeIdInput').value = recipe.recipeId || '';
+      byId('recipeNameInput').value = recipe.name || '';
+      byId('outputItemIdInput').value = recipe.outputItemId || '';
+      byId('outputQuantityInput').value = recipe.outputQuantity ?? 1;
+      byId('craftSecondsInput').value = recipe.craftSeconds ?? 1;
+      renderIngredients((recipe.ingredients || []).length > 0 ? recipe.ingredients : [{ itemId: '', quantity: 1 }]);
+    }
+
+    function collectRecipeForm() {
+      return {
+        recipeId: byId('recipeIdInput').value.trim(),
+        name: byId('recipeNameInput').value.trim(),
+        outputItemId: byId('outputItemIdInput').value.trim(),
+        outputQuantity: parseInt(byId('outputQuantityInput').value || '1', 10),
+        craftSeconds: parseInt(byId('craftSecondsInput').value || '1', 10),
+        ingredients: Array.from(byId('ingredients').querySelectorAll('.ingredient-row'))
+          .map(row => ({
+            itemId: row.querySelector('.ingredient-item').value.trim(),
+            quantity: parseInt(row.querySelector('.ingredient-quantity').value || '1', 10)
+          }))
+          .filter(ingredient => ingredient.itemId)
+      };
     }
 
     async function loadRecipes() {
       const response = await fetch('/api/crafting/recipes', { cache: 'no-store' });
-      const data = await response.json();
-      renderRecipes(data);
-      byId('status').textContent = `Loaded ${data.length} recipes`;
+      recipes = await response.json();
+      renderRecipes(recipes);
+      byId('status').textContent = `Loaded ${recipes.length} recipes`;
     }
 
     async function saveRecipe() {
-      const payload = JSON.parse(byId('recipeJson').value);
+      const payload = collectRecipeForm();
       const response = await fetch('/api/crafting/recipes/upsert', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -1829,9 +2788,18 @@ public sealed class ManagementDashboardHost
       byId('status').textContent = data.message;
     }
 
+    byId('addIngredientBtn').addEventListener('click', () => {
+      const existing = Array.from(byId('ingredients').querySelectorAll('.ingredient-row')).map(row => ({
+        itemId: row.querySelector('.ingredient-item').value,
+        quantity: row.querySelector('.ingredient-quantity').value
+      }));
+      existing.push({ itemId: '', quantity: 1 });
+      renderIngredients(existing);
+    });
     byId('loadRecipes').addEventListener('click', loadRecipes);
     byId('saveRecipe').addEventListener('click', () => saveRecipe().catch(err => byId('status').textContent = err.message));
     byId('craftBtn').addEventListener('click', () => craft().catch(err => byId('status').textContent = err.message));
+    fillRecipeForm({ recipeId: 'make-cloth', name: 'Make Cloth', outputItemId: 'cloth', outputQuantity: 1, craftSeconds: 4, ingredients: [{ itemId: 'fiber', quantity: 3 }] });
     loadRecipes();
   </script>
 </body>
@@ -2185,12 +3153,15 @@ public sealed class ManagementDashboardHost
     .wrap { width: min(1160px, calc(100vw - 32px)); margin: 0 auto; padding: 24px 0 36px; display: grid; gap: 16px; }
     .card { background: rgba(255,255,255,0.85); border: 1px solid rgba(61,43,31,0.14); border-radius: 18px; padding: 16px; }
     .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
-    input, textarea { padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(61,43,31,0.2); min-width: 140px; font-family: inherit; }
-    textarea { width: 100%; min-height: 130px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.88rem; }
+    input { padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(61,43,31,0.2); min-width: 140px; font-family: inherit; }
     button, a.btn { display: inline-flex; align-items: center; border-radius: 999px; border: 1px solid rgba(61,43,31,0.2); background: #fff; color: #26170f; padding: 8px 14px; text-decoration: none; cursor: pointer; }
     table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.93rem; }
     th, td { text-align: left; padding: 8px; border-bottom: 1px solid rgba(61,43,31,0.1); vertical-align: top; }
     .muted { color: #6a5547; font-size: 0.92rem; }
+    .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .field { display: grid; gap: 6px; }
+    .field.full { grid-column: 1 / -1; }
+    @media (max-width: 760px) { .form-grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -2205,8 +3176,16 @@ public sealed class ManagementDashboardHost
     </section>
     <section class="card">
       <h2>Definition Upsert</h2>
-      <p class="muted">JSON example: {"questId":"q_gather_hemp","title":"Hemp Harvest","description":"Collect hemp nodes","targetAction":"gather","targetCount":5,"rewardExperience":75,"rewardReputationFaction":"wardens","rewardReputationAmount":20}</p>
-      <textarea id="definitionJson">{"questId":"q_gather_hemp","title":"Hemp Harvest","description":"Collect hemp nodes","targetAction":"gather","targetCount":5,"rewardExperience":75,"rewardReputationFaction":"wardens","rewardReputationAmount":20}</textarea>
+      <div class="form-grid">
+        <div class="field"><label for="definitionQuestId">Quest Id</label><input id="definitionQuestId" value="q_gather_hemp" /></div>
+        <div class="field"><label for="definitionTitle">Title</label><input id="definitionTitle" value="Hemp Harvest" /></div>
+        <div class="field full"><label for="definitionDescription">Description</label><input id="definitionDescription" value="Collect hemp nodes" /></div>
+        <div class="field"><label for="definitionTargetAction">Target Action</label><input id="definitionTargetAction" value="gather" /></div>
+        <div class="field"><label for="definitionTargetCount">Target Count</label><input id="definitionTargetCount" type="number" value="5" /></div>
+        <div class="field"><label for="definitionRewardExperience">Reward Experience</label><input id="definitionRewardExperience" type="number" value="75" /></div>
+        <div class="field"><label for="definitionRewardFaction">Reward Reputation Faction</label><input id="definitionRewardFaction" value="wardens" /></div>
+        <div class="field"><label for="definitionRewardAmount">Reward Reputation Amount</label><input id="definitionRewardAmount" type="number" value="20" /></div>
+      </div>
       <div class="row">
         <button id="upsertBtn">Upsert Definition</button>
       </div>
@@ -2240,13 +3219,49 @@ public sealed class ManagementDashboardHost
   <script>
     function byId(id) { return document.getElementById(id); }
 
+    function collectDefinition() {
+      return {
+        questId: byId('definitionQuestId').value.trim(),
+        title: byId('definitionTitle').value.trim(),
+        description: byId('definitionDescription').value.trim(),
+        targetAction: byId('definitionTargetAction').value.trim(),
+        targetCount: parseInt(byId('definitionTargetCount').value || '0', 10),
+        rewardExperience: parseInt(byId('definitionRewardExperience').value || '0', 10),
+        rewardReputationFaction: byId('definitionRewardFaction').value.trim(),
+        rewardReputationAmount: parseInt(byId('definitionRewardAmount').value || '0', 10)
+      };
+    }
+
+    function fillDefinition(definition) {
+      byId('definitionQuestId').value = definition.questId || '';
+      byId('definitionTitle').value = definition.title || '';
+      byId('definitionDescription').value = definition.description || '';
+      byId('definitionTargetAction').value = definition.targetAction || '';
+      byId('definitionTargetCount').value = definition.targetCount ?? 0;
+      byId('definitionRewardExperience').value = definition.rewardExperience ?? 0;
+      byId('definitionRewardFaction').value = definition.rewardReputationFaction || '';
+      byId('definitionRewardAmount').value = definition.rewardReputationAmount ?? 0;
+    }
+
     function render(board) {
       byId('definitions').innerHTML = (board.definitions || []).map(q => `
-        <tr><td><strong>${q.questId}</strong><br>${q.title}<br><span class="muted">${q.description}</span></td><td>${q.targetAction} x${q.targetCount}</td><td>${q.rewardExperience} XP<br>${q.rewardReputationAmount} ${q.rewardReputationFaction || '(none)'}</td></tr>`).join('');
+        <tr data-quest-id="${q.questId}"><td><strong>${q.questId}</strong><br>${q.title}<br><span class="muted">${q.description}</span></td><td>${q.targetAction} x${q.targetCount}</td><td>${q.rewardExperience} XP<br>${q.rewardReputationAmount} ${q.rewardReputationFaction || '(none)'}</td></tr>`).join('');
       byId('progress').innerHTML = (board.progress || []).map(p => `
         <tr><td>${p.questId}</td><td>${p.progressCount}</td><td>${p.isCompleted}</td><td>${p.isClaimed}</td><td>${new Date(p.updatedAtUtc).toLocaleString()}</td></tr>`).join('');
       byId('events').innerHTML = (board.recentEvents || []).map(e => `
         <tr><td>${e.questId}</td><td>${e.eventType}</td><td>${e.amount}</td><td>${e.notes}</td><td>${new Date(e.createdAtUtc).toLocaleString()}</td></tr>`).join('');
+
+      byId('definitions').querySelectorAll('tr').forEach(row => {
+        row.addEventListener('click', () => {
+          const definition = (board.definitions || []).find(entry => entry.questId === row.dataset.questId);
+          if (!definition) {
+            return;
+          }
+
+          fillDefinition(definition);
+          byId('status').textContent = `Loaded definition ${definition.questId} into the form.`;
+        });
+      });
     }
 
     async function load() {
@@ -2266,13 +3281,7 @@ public sealed class ManagementDashboardHost
     }
 
     async function upsertDefinition() {
-      let definition;
-      try {
-        definition = JSON.parse(byId('definitionJson').value);
-      } catch (error) {
-        byId('status').textContent = `Invalid JSON: ${error.message}`;
-        return;
-      }
+      const definition = collectDefinition();
 
       const response = await fetch('/api/quests/definitions/upsert', {
         method: 'POST',
@@ -2374,12 +3383,15 @@ public sealed class ManagementDashboardHost
     .wrap { width: min(1180px, calc(100vw - 32px)); margin: 0 auto; padding: 24px 0 36px; display: grid; gap: 16px; }
     .card { background: rgba(255,255,255,0.85); border: 1px solid rgba(61,43,31,0.14); border-radius: 18px; padding: 16px; }
     .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
-    input, textarea { padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(61,43,31,0.2); min-width: 140px; font-family: inherit; }
-    textarea { width: 100%; min-height: 120px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.88rem; }
+    input, select { padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(61,43,31,0.2); min-width: 140px; font-family: inherit; }
     button, a.btn { display: inline-flex; align-items: center; border-radius: 999px; border: 1px solid rgba(61,43,31,0.2); background: #fff; color: #26170f; padding: 8px 14px; text-decoration: none; cursor: pointer; }
     table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.93rem; }
     th, td { text-align: left; padding: 8px; border-bottom: 1px solid rgba(61,43,31,0.1); vertical-align: top; }
     .muted { color: #6a5547; font-size: 0.92rem; }
+    .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .field { display: grid; gap: 6px; }
+    .field.full { grid-column: 1 / -1; }
+    @media (max-width: 760px) { .form-grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -2394,8 +3406,17 @@ public sealed class ManagementDashboardHost
     </section>
     <section class="card">
       <h2>Event Upsert</h2>
-      <p class="muted">JSON example: {"eventId":"we_storm_001","title":"Stormfront Defense","description":"Defeat storm creatures across zones","state":"active","startsAtUtc":"2026-01-01T00:00:00Z","endsAtUtc":"2026-01-02T00:00:00Z","baseRewardExperience":200,"rewardReputationFaction":"wardens","rewardReputationAmount":35,"createdAtUtc":"2026-01-01T00:00:00Z"}</p>
-      <textarea id="eventJson">{"eventId":"we_storm_001","title":"Stormfront Defense","description":"Defeat storm creatures across zones","state":"draft","startsAtUtc":"2026-01-01T00:00:00Z","endsAtUtc":"2026-01-02T00:00:00Z","baseRewardExperience":200,"rewardReputationFaction":"wardens","rewardReputationAmount":35,"createdAtUtc":"2026-01-01T00:00:00Z"}</textarea>
+      <div class="form-grid">
+        <div class="field"><label for="eventIdInput">Event Id</label><input id="eventIdInput" value="we_storm_001" /></div>
+        <div class="field"><label for="eventTitleInput">Title</label><input id="eventTitleInput" value="Stormfront Defense" /></div>
+        <div class="field full"><label for="eventDescriptionInput">Description</label><input id="eventDescriptionInput" value="Defeat storm creatures across zones" /></div>
+        <div class="field"><label for="eventStateInput">State</label><select id="eventStateInput"><option value="draft">draft</option><option value="active">active</option><option value="resolved">resolved</option></select></div>
+        <div class="field"><label for="eventRewardExperienceInput">Base Reward Experience</label><input id="eventRewardExperienceInput" type="number" value="200" /></div>
+        <div class="field"><label for="eventRewardFactionInput">Reward Reputation Faction</label><input id="eventRewardFactionInput" value="wardens" /></div>
+        <div class="field"><label for="eventRewardAmountInput">Reward Reputation Amount</label><input id="eventRewardAmountInput" type="number" value="35" /></div>
+        <div class="field"><label for="eventStartsInput">Starts At</label><input id="eventStartsInput" type="datetime-local" value="2026-01-01T00:00" /></div>
+        <div class="field"><label for="eventEndsInput">Ends At</label><input id="eventEndsInput" type="datetime-local" value="2026-01-02T00:00" /></div>
+      </div>
       <div class="row">
         <button id="upsertBtn">Upsert Event</button>
       </div>
@@ -2431,13 +3452,71 @@ public sealed class ManagementDashboardHost
   <script>
     function byId(id) { return document.getElementById(id); }
 
+    function toUtcIso(value) {
+      if (!value) {
+        return new Date().toISOString();
+      }
+
+      return new Date(value).toISOString();
+    }
+
+    function toLocalInputValue(value) {
+      if (!value) {
+        return '';
+      }
+
+      const date = new Date(value);
+      const pad = number => String(number).padStart(2, '0');
+      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    }
+
+    function collectEventForm() {
+      return {
+        eventId: byId('eventIdInput').value.trim(),
+        title: byId('eventTitleInput').value.trim(),
+        description: byId('eventDescriptionInput').value.trim(),
+        state: byId('eventStateInput').value,
+        startsAtUtc: toUtcIso(byId('eventStartsInput').value),
+        endsAtUtc: toUtcIso(byId('eventEndsInput').value),
+        baseRewardExperience: parseInt(byId('eventRewardExperienceInput').value || '0', 10),
+        rewardReputationFaction: byId('eventRewardFactionInput').value.trim(),
+        rewardReputationAmount: parseInt(byId('eventRewardAmountInput').value || '0', 10),
+        createdAtUtc: new Date().toISOString()
+      };
+    }
+
+    function fillEventForm(eventPayload) {
+      byId('eventIdInput').value = eventPayload.eventId || '';
+      byId('eventTitleInput').value = eventPayload.title || '';
+      byId('eventDescriptionInput').value = eventPayload.description || '';
+      byId('eventStateInput').value = eventPayload.state || 'draft';
+      byId('eventStartsInput').value = toLocalInputValue(eventPayload.startsAtUtc);
+      byId('eventEndsInput').value = toLocalInputValue(eventPayload.endsAtUtc);
+      byId('eventRewardExperienceInput').value = eventPayload.baseRewardExperience ?? 0;
+      byId('eventRewardFactionInput').value = eventPayload.rewardReputationFaction || '';
+      byId('eventRewardAmountInput').value = eventPayload.rewardReputationAmount ?? 0;
+    }
+
     function render(board) {
       byId('events').innerHTML = (board.events || []).map(e => `
-        <tr><td><strong>${e.eventId}</strong><br>${e.title}<br><span class="muted">${e.description}</span></td><td>${e.state}</td><td>${new Date(e.startsAtUtc).toLocaleString()}<br>${new Date(e.endsAtUtc).toLocaleString()}</td><td>${e.baseRewardExperience} XP<br>${e.rewardReputationAmount} ${e.rewardReputationFaction || '(none)'}</td></tr>`).join('');
+        <tr data-event-id="${e.eventId}"><td><strong>${e.eventId}</strong><br>${e.title}<br><span class="muted">${e.description}</span></td><td>${e.state}</td><td>${new Date(e.startsAtUtc).toLocaleString()}<br>${new Date(e.endsAtUtc).toLocaleString()}</td><td>${e.baseRewardExperience} XP<br>${e.rewardReputationAmount} ${e.rewardReputationFaction || '(none)'}</td></tr>`).join('');
       byId('participation').innerHTML = (board.participation || []).map(p => `
         <tr><td>${p.eventId}</td><td>${p.contribution}</td><td>${p.isClaimed}</td><td>${new Date(p.updatedAtUtc).toLocaleString()}</td></tr>`).join('');
       byId('logs').innerHTML = (board.recentLogs || []).map(log => `
         <tr><td>${log.eventId}</td><td>${log.accountId}</td><td>${log.actionType}</td><td>${log.details}</td><td>${new Date(log.createdAtUtc).toLocaleString()}</td></tr>`).join('');
+
+      byId('events').querySelectorAll('tr').forEach(row => {
+        row.addEventListener('click', () => {
+          const eventPayload = (board.events || []).find(entry => entry.eventId === row.dataset.eventId);
+          if (!eventPayload) {
+            return;
+          }
+
+          fillEventForm(eventPayload);
+          byId('eventId').value = eventPayload.eventId || '';
+          byId('status').textContent = `Loaded event ${eventPayload.eventId} into the form.`;
+        });
+      });
     }
 
     function renderLeaderboard(entries) {
@@ -2463,13 +3542,7 @@ public sealed class ManagementDashboardHost
     }
 
     async function upsert() {
-      let eventPayload;
-      try {
-        eventPayload = JSON.parse(byId('eventJson').value);
-      } catch (error) {
-        byId('status').textContent = `Invalid JSON: ${error.message}`;
-        return;
-      }
+      const eventPayload = collectEventForm();
       const response = await fetch('/api/world-events/upsert', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -2599,12 +3672,15 @@ public sealed class ManagementDashboardHost
     .wrap { width: min(1180px, calc(100vw - 32px)); margin: 0 auto; padding: 24px 0 36px; display: grid; gap: 16px; }
     .card { background: rgba(255,255,255,0.85); border: 1px solid rgba(61,43,31,0.14); border-radius: 18px; padding: 16px; }
     .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; margin-bottom: 10px; }
-    input, textarea { padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(61,43,31,0.2); min-width: 140px; font-family: inherit; }
-    textarea { width: 100%; min-height: 120px; font-family: ui-monospace, SFMono-Regular, Menlo, Consolas, monospace; font-size: 0.88rem; }
+    input, select { padding: 8px 10px; border-radius: 10px; border: 1px solid rgba(61,43,31,0.2); min-width: 140px; font-family: inherit; }
     button, a.btn { display: inline-flex; align-items: center; border-radius: 999px; border: 1px solid rgba(61,43,31,0.2); background: #fff; color: #26170f; padding: 8px 14px; text-decoration: none; cursor: pointer; }
     table { width: 100%; border-collapse: collapse; margin-top: 10px; font-size: 0.93rem; }
     th, td { text-align: left; padding: 8px; border-bottom: 1px solid rgba(61,43,31,0.1); vertical-align: top; }
     .muted { color: #6a5547; font-size: 0.92rem; }
+    .form-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 10px; }
+    .field { display: grid; gap: 6px; }
+    .field.full { grid-column: 1 / -1; }
+    @media (max-width: 760px) { .form-grid { grid-template-columns: 1fr; } }
   </style>
 </head>
 <body>
@@ -2619,8 +3695,17 @@ public sealed class ManagementDashboardHost
     </section>
     <section class="card">
       <h2>Invasion Upsert</h2>
-      <p class="muted">JSON example: {"invasionId":"inv_northfield_001","zoneId":1,"mobTypeId":"goblin_raider","totalWaves":4,"currentWave":0,"state":"planned","threatLevel":3,"startsAtUtc":"2026-01-01T00:00:00Z","endsAtUtc":"2026-01-02T00:00:00Z"}</p>
-      <textarea id="invasionJson">{"invasionId":"inv_northfield_001","zoneId":1,"mobTypeId":"goblin_raider","totalWaves":4,"currentWave":0,"state":"planned","threatLevel":3,"startsAtUtc":"2026-01-01T00:00:00Z","endsAtUtc":"2026-01-02T00:00:00Z"}</textarea>
+      <div class="form-grid">
+        <div class="field"><label for="invasionIdInput">Invasion Id</label><input id="invasionIdInput" value="inv_northfield_001" /></div>
+        <div class="field"><label for="invasionZoneIdInput">Zone Id</label><input id="invasionZoneIdInput" type="number" value="1" /></div>
+        <div class="field"><label for="invasionMobTypeInput">Mob Type Id</label><input id="invasionMobTypeInput" value="goblin_raider" /></div>
+        <div class="field"><label for="invasionStateInput">State</label><select id="invasionStateInput"><option value="planned">planned</option><option value="active">active</option><option value="resolved">resolved</option></select></div>
+        <div class="field"><label for="invasionTotalWavesInput">Total Waves</label><input id="invasionTotalWavesInput" type="number" value="4" /></div>
+        <div class="field"><label for="invasionCurrentWaveInput">Current Wave</label><input id="invasionCurrentWaveInput" type="number" value="0" /></div>
+        <div class="field"><label for="invasionThreatInput">Threat Level</label><input id="invasionThreatInput" type="number" value="3" /></div>
+        <div class="field"><label for="invasionStartsInput">Starts At</label><input id="invasionStartsInput" type="datetime-local" value="2026-01-01T00:00" /></div>
+        <div class="field"><label for="invasionEndsInput">Ends At</label><input id="invasionEndsInput" type="datetime-local" value="2026-01-02T00:00" /></div>
+      </div>
       <div class="row"><button id="upsertBtn">Upsert Invasion</button></div>
     </section>
     <section class="card">
@@ -2650,13 +3735,70 @@ public sealed class ManagementDashboardHost
   <script>
     function byId(id) { return document.getElementById(id); }
 
+    function toUtcIso(value) {
+      if (!value) {
+        return new Date().toISOString();
+      }
+
+      return new Date(value).toISOString();
+    }
+
+    function toLocalInputValue(value) {
+      if (!value) {
+        return '';
+      }
+
+      const date = new Date(value);
+      const pad = number => String(number).padStart(2, '0');
+      return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())}T${pad(date.getHours())}:${pad(date.getMinutes())}`;
+    }
+
+    function collectInvasionForm() {
+      return {
+        invasionId: byId('invasionIdInput').value.trim(),
+        zoneId: parseInt(byId('invasionZoneIdInput').value || '0', 10),
+        mobTypeId: byId('invasionMobTypeInput').value.trim(),
+        totalWaves: parseInt(byId('invasionTotalWavesInput').value || '0', 10),
+        currentWave: parseInt(byId('invasionCurrentWaveInput').value || '0', 10),
+        state: byId('invasionStateInput').value,
+        threatLevel: parseInt(byId('invasionThreatInput').value || '0', 10),
+        startsAtUtc: toUtcIso(byId('invasionStartsInput').value),
+        endsAtUtc: toUtcIso(byId('invasionEndsInput').value)
+      };
+    }
+
+    function fillInvasionForm(invasion) {
+      byId('invasionIdInput').value = invasion.invasionId || '';
+      byId('invasionZoneIdInput').value = invasion.zoneId ?? 0;
+      byId('invasionMobTypeInput').value = invasion.mobTypeId || '';
+      byId('invasionTotalWavesInput').value = invasion.totalWaves ?? 0;
+      byId('invasionCurrentWaveInput').value = invasion.currentWave ?? 0;
+      byId('invasionStateInput').value = invasion.state || 'planned';
+      byId('invasionThreatInput').value = invasion.threatLevel ?? 0;
+      byId('invasionStartsInput').value = toLocalInputValue(invasion.startsAtUtc);
+      byId('invasionEndsInput').value = toLocalInputValue(invasion.endsAtUtc);
+    }
+
     function render(board) {
       byId('invasions').innerHTML = (board.invasions || []).map(i => `
-        <tr><td>${i.invasionId}</td><td>${i.zoneId}</td><td>${i.mobTypeId}</td><td>${i.currentWave}/${i.totalWaves}</td><td>${i.state}</td><td>${i.threatLevel}</td></tr>`).join('');
+        <tr data-invasion-id="${i.invasionId}"><td>${i.invasionId}</td><td>${i.zoneId}</td><td>${i.mobTypeId}</td><td>${i.currentWave}/${i.totalWaves}</td><td>${i.state}</td><td>${i.threatLevel}</td></tr>`).join('');
       byId('contrib').innerHTML = (board.contributions || []).map(c => `
         <tr><td>${c.invasionId}</td><td>${c.kills}</td><td>${c.isClaimed}</td><td>${new Date(c.updatedAtUtc).toLocaleString()}</td></tr>`).join('');
       byId('logs').innerHTML = (board.recentLogs || []).map(log => `
         <tr><td>${log.invasionId}</td><td>${log.accountId}</td><td>${log.actionType}</td><td>${log.details}</td><td>${new Date(log.createdAtUtc).toLocaleString()}</td></tr>`).join('');
+
+      byId('invasions').querySelectorAll('tr').forEach(row => {
+        row.addEventListener('click', () => {
+          const invasion = (board.invasions || []).find(entry => entry.invasionId === row.dataset.invasionId);
+          if (!invasion) {
+            return;
+          }
+
+          fillInvasionForm(invasion);
+          byId('invasionId').value = invasion.invasionId || '';
+          byId('status').textContent = `Loaded invasion ${invasion.invasionId} into the form.`;
+        });
+      });
     }
 
     async function load() {
@@ -2670,10 +3812,7 @@ public sealed class ManagementDashboardHost
     }
 
     async function upsert() {
-      let invasion;
-      try { invasion = JSON.parse(byId('invasionJson').value); } catch (error) {
-        byId('status').textContent = `Invalid JSON: ${error.message}`; return;
-      }
+      const invasion = collectInvasionForm();
       const response = await fetch('/api/invasions/upsert', {
         method: 'POST',
         headers: { 'content-type': 'application/json' },
@@ -2755,32 +3894,34 @@ public sealed class ManagementDashboardHost
   <title>MMO Network Map</title>
   <style>
     :root {
-      --panel: rgba(255,255,255,0.82);
-      --panel-border: rgba(61,43,31,0.14);
-      --text: #26170f;
-      --muted: #6a5547;
-      --zone-fill: rgba(161,77,45,0.14);
-      --zone-stroke: #a14d2d;
-      --player-moving: #24613e;
-      --player-idle: #a06018;
-      --player-transfer: #c08b14;
-      --player-ghost: #7d5ea8;
-      --player-selected: #0a6c91;
-      --trail: rgba(36,97,62,0.34);
-      --transfer-line: rgba(160,96,24,0.72);
-      --prewarm-fill: rgba(192,139,20,0.12);
-      --event: rgba(10,108,145,0.84);
-      --shadow: 0 18px 60px rgba(59,34,20,0.12);
+      --bg: #09131a;
+      --bg2: #101d27;
+      --panel: rgba(14, 26, 36, 0.78);
+      --panel-border: rgba(138, 202, 255, 0.14);
+      --text: #ecf6ff;
+      --muted: #8aa3b8;
+      --zone-fill: rgba(85,214,255,0.08);
+      --zone-stroke: rgba(85,214,255,0.65);
+      --player-moving: #5ee2a0;
+      --player-idle: #ffbf69;
+      --player-transfer: #ffd166;
+      --player-ghost: #9d7cff;
+      --player-selected: #55d6ff;
+      --trail: rgba(94,226,160,0.24);
+      --transfer-line: rgba(255,191,105,0.68);
+      --prewarm-fill: rgba(255,209,102,0.10);
+      --event: rgba(85,214,255,0.84);
+      --shadow: 0 24px 80px rgba(0,0,0,0.34);
     }
     * { box-sizing: border-box; }
     body {
       margin: 0;
-      font-family: Georgia, "Palatino Linotype", serif;
+      font-family: "Segoe UI", Inter, system-ui, sans-serif;
       color: var(--text);
       background:
-        radial-gradient(circle at top left, #f8e8ce 0, transparent 30%),
-        radial-gradient(circle at bottom right, #e8c7ba 0, transparent 28%),
-        linear-gradient(160deg, #f3ebdf 0%, #efe4d6 40%, #e7d7ca 100%);
+        radial-gradient(circle at top left, rgba(85,214,255,0.10) 0, transparent 28%),
+        radial-gradient(circle at top right, rgba(89,167,255,0.10) 0, transparent 22%),
+        linear-gradient(180deg, var(--bg) 0%, var(--bg2) 100%);
       min-height: 100vh;
     }
     .wrap {
@@ -2793,10 +3934,10 @@ public sealed class ManagementDashboardHost
     .card {
       background: var(--panel);
       border: 1px solid var(--panel-border);
-      border-radius: 22px;
+      border-radius: 24px;
       box-shadow: var(--shadow);
-      backdrop-filter: blur(14px);
-      padding: 18px;
+      backdrop-filter: blur(18px);
+      padding: 20px;
     }
     .hero {
       display: flex;
@@ -2808,24 +3949,25 @@ public sealed class ManagementDashboardHost
     .title { display: grid; gap: 8px; }
     h1 {
       margin: 0;
-      font-size: clamp(2rem, 4vw, 3.8rem);
-      line-height: 0.95;
+      font-size: clamp(2.4rem, 4.5vw, 4.4rem);
+      line-height: 0.92;
       letter-spacing: -0.05em;
+      max-width: 11ch;
     }
-    .sub { color: var(--muted); }
+    .sub { color: var(--muted); line-height: 1.55; }
     .nav a {
       display: inline-flex;
-      padding: 8px 12px;
+      padding: 10px 14px;
       border-radius: 999px;
       border: 1px solid var(--panel-border);
       color: var(--text);
       text-decoration: none;
       margin-left: 8px;
-      background: rgba(255,255,255,0.56);
+      background: rgba(255,255,255,0.04);
     }
     .layout {
       display: grid;
-      grid-template-columns: minmax(0, 1fr) 360px;
+      grid-template-columns: minmax(0, 1fr) 390px;
       gap: 16px;
     }
     .map-frame {
@@ -2857,8 +3999,11 @@ public sealed class ManagementDashboardHost
       width: 100%;
       height: min(72vh, 820px);
       display: block;
-      background: linear-gradient(180deg, rgba(255,255,255,0.5), rgba(255,255,255,0.2));
-      border-radius: 18px;
+      background:
+        radial-gradient(circle at top left, rgba(85,214,255,0.08) 0, transparent 30%),
+        linear-gradient(180deg, rgba(255,255,255,0.05), rgba(255,255,255,0.02));
+      border-radius: 20px;
+      border: 1px solid rgba(138,202,255,0.10);
     }
     .legend, .zone-list, .event-list, .player-detail { display: grid; gap: 10px; }
     .legend-item, .zone-item {
@@ -2890,8 +4035,8 @@ public sealed class ManagementDashboardHost
       gap: 4px;
       padding: 10px 12px;
       border-radius: 14px;
-      background: rgba(255,255,255,0.54);
-      border: 1px solid rgba(61,43,31,0.08);
+      background: rgba(255,255,255,0.03);
+      border: 1px solid rgba(138,202,255,0.10);
     }
     .detail-grid {
       display: grid;
@@ -2910,13 +4055,14 @@ public sealed class ManagementDashboardHost
   <div class="wrap">
     <section class="card hero">
       <div class="title">
-        <div class="sub">Operations Map</div>
-        <h1>Zones, handoffs, and live player movement.</h1>
-        <div class="sub">This view turns the runtime snapshot into a spatial debugging surface for seams, prewarm regions, and live transfers.</div>
+        <div class="sub" style="text-transform:uppercase; letter-spacing:0.14em; font-size:0.78rem; color:#55d6ff;">Live Ops Map</div>
+        <h1>World topology, transfers, and player flow.</h1>
+        <div class="sub">This view is the spatial counterpart to the live-ops dashboard: monitor seam pressure, prewarm coverage, active sessions, and transfer continuity across the world.</div>
       </div>
       <div class="nav">
         <a href="/">Dashboard</a>
         <a href="/map">Map</a>
+        <a href="/tools">Tools</a>
       </div>
     </section>
     <section class="layout">
@@ -2927,7 +4073,7 @@ public sealed class ManagementDashboardHost
             <label><input id="toggleEvents" type="checkbox" checked> Transfer events</label>
             <label><input id="toggleMargins" type="checkbox" checked> Boundary margins</label>
           </div>
-          <div class="toolbar-group"><span>Refresh: 1.5s</span></div>
+          <div class="toolbar-group"><span>Refresh cadence: 1.5s</span></div>
         </div>
         <svg id="mapSvg" viewBox="0 0 1200 720" preserveAspectRatio="xMidYMid meet"></svg>
       </article>
@@ -2937,10 +4083,12 @@ public sealed class ManagementDashboardHost
           <div class="legend-item"><span><span class="swatch" style="background: var(--player-idle);"></span>Idle player</span><span id="idleCount">0</span></div>
           <div class="legend-item"><span><span class="swatch" style="background: var(--player-transfer);"></span>Transferring</span><span id="transferCount">0</span></div>
           <div class="legend-item"><span><span class="swatch" style="background: var(--player-ghost);"></span>Ghost / overlap</span><span id="ghostCount">0</span></div>
+          <div class="legend-item"><span><span class="swatch" style="background: #ff7d7d;"></span>Mobs</span><span id="mobCount">0</span></div>
+          <div class="legend-item"><span><span class="swatch" style="background: #6ed6ff;"></span>Resource nodes</span><span id="nodeCount">0</span></div>
           <div class="legend-item"><span>Zones</span><span id="zoneCount">0</span></div>
           <div class="legend-item"><span>Updated</span><span id="updatedAt">-</span></div>
         </div>
-        <div class="section-title">Player Detail</div>
+        <div class="section-title">Selected Player</div>
         <div class="player-detail" id="playerDetail">
           <div class="empty">Click a player marker to inspect session, velocity, zone, and pending transfer.</div>
         </div>
@@ -2948,8 +4096,10 @@ public sealed class ManagementDashboardHost
         <div class="event-list" id="eventList">
           <div class="empty">No transfer events observed yet.</div>
         </div>
-        <div class="section-title">Zones</div>
+        <div class="section-title">Zone Topology</div>
         <div class="zone-list" id="zoneList"></div>
+        <div class="section-title">Resource Nodes</div>
+        <div class="zone-list" id="nodeList"></div>
       </aside>
     </section>
   </div>
@@ -2965,6 +4115,8 @@ public sealed class ManagementDashboardHost
     const recentEvents = [];
     let selectedSessionId = null;
     let latestPlayers = [];
+    let latestNodes = [];
+    let latestMobs = [];
 
     function escapeHtml(value) {
       return String(value)
@@ -2975,6 +4127,14 @@ public sealed class ManagementDashboardHost
 
     function fmt(n) {
       return Number(n).toFixed(2);
+    }
+
+    function nodeColor(node) {
+      const resourceId = String(node.resourceId || '').toLowerCase();
+      if (resourceId.includes('ore') || resourceId.includes('stone')) return '#9fb4c7';
+      if (resourceId.includes('tree') || resourceId.includes('wood') || resourceId.includes('log')) return '#5ee2a0';
+      if (resourceId.includes('fiber') || resourceId.includes('hemp')) return '#6ed6ff';
+      return '#8fd3ff';
     }
 
     function classifyPlayer(player) {
@@ -3066,8 +4226,46 @@ public sealed class ManagementDashboardHost
         </div>`).join('');
     }
 
-    function render(snapshot) {
-      const zones = snapshot.zones;
+    function render(snapshot, definitions) {
+      const runtimeZones = snapshot.zones || [];
+      const definitionZones = definitions && definitions.zones ? definitions.zones : [];
+      const runtimeByZoneId = new Map(runtimeZones.map(zone => [zone.zoneId, zone]));
+      const combinedZones = (definitionZones.length > 0 ? definitionZones : runtimeZones)
+        .map(zone => {
+          const runtime = runtimeByZoneId.get(zone.zoneId);
+          return runtime
+            ? { ...runtime }
+            : {
+                zoneId: zone.zoneId,
+                name: zone.name,
+                minX: zone.minX,
+                maxX: zone.maxX,
+                minZ: zone.minZ,
+                maxZ: zone.maxZ,
+                runtimeMode: 'Unmanaged',
+                lifecycleState: 'Unknown',
+                lastStateChangeUtc: snapshot.generatedAtUtc,
+                idleSinceUtc: null,
+                tick: 0,
+                activePlayers: 0,
+                activeGhosts: 0,
+                totalTransfersInitiated: 0,
+                aoiRadius: 0,
+                ghostMargin: 0,
+                prewarmMargin: 0,
+                transferInset: 0,
+                players: [],
+                mobs: []
+              };
+        });
+
+      for (const zone of runtimeZones) {
+        if (!combinedZones.some(candidate => candidate.zoneId === zone.zoneId)) {
+          combinedZones.push(zone);
+        }
+      }
+
+      const zones = combinedZones.sort((left, right) => left.zoneId - right.zoneId);
       if (zones.length === 0) {
         svg.innerHTML = '';
         return;
@@ -3098,7 +4296,16 @@ public sealed class ManagementDashboardHost
       let transferCount = 0;
       let ghostCount = 0;
 
-      const flattenedPlayers = zones.flatMap(zone => zone.players.map(player => ({
+      latestNodes = (definitions && definitions.nodes ? definitions.nodes : []).filter(node =>
+        typeof node.positionX === 'number' &&
+        typeof node.positionZ === 'number');
+      latestMobs = runtimeZones.flatMap(zone => (zone.mobs || []).map(mob => ({
+        ...mob,
+        zoneId: zone.zoneId,
+        zoneName: zone.name
+      })));
+
+      const flattenedPlayers = runtimeZones.flatMap(zone => zone.players.map(player => ({
         ...player,
         zoneId: zone.zoneId,
         zoneName: zone.name
@@ -3122,8 +4329,8 @@ public sealed class ManagementDashboardHost
             <rect x="${x}" y="${y}" width="${w}" height="${h}" rx="18" fill="var(--zone-fill)" stroke="var(--zone-stroke)" stroke-width="3"></rect>
             ${toggleMargins.checked && prewarmWidth > 0 ? `<rect x="${prewarmStartX}" y="${y}" width="${prewarmWidth}" height="${h}" fill="var(--prewarm-fill)"></rect>` : ''}
             ${toggleMargins.checked ? `<line x1="${rightBoundaryX}" y1="${y}" x2="${rightBoundaryX}" y2="${y + h}" stroke="var(--transfer-line)" stroke-width="2.5" stroke-dasharray="8 8"></line>` : ''}
-            <text x="${x + 16}" y="${y + 28}" font-size="20" fill="#26170f" font-weight="700">${escapeHtml(zone.name)} (${zone.zoneId})</text>
-            <text x="${x + 16}" y="${y + 52}" font-size="15" fill="#6a5547">${escapeHtml(zone.lifecycleState)} · ${escapeHtml(zone.runtimeMode)}</text>
+            <text x="${x + 16}" y="${y + 28}" font-size="20" fill="#ecf6ff" font-weight="700">${escapeHtml(zone.name)} (${zone.zoneId})</text>
+            <text x="${x + 16}" y="${y + 52}" font-size="15" fill="#8aa3b8">${escapeHtml(zone.lifecycleState)} · ${escapeHtml(zone.runtimeMode)}</text>
           </g>`;
       }).join('');
 
@@ -3144,6 +4351,27 @@ public sealed class ManagementDashboardHost
             </g>`).join('')
         : '';
 
+      const nodeMarkers = latestNodes.map(node => {
+        const x = projectX(node.positionX);
+        const y = projectY(node.positionZ);
+        const color = nodeColor(node);
+        return `
+          <g>
+            <rect x="${x - 6}" y="${y - 6}" width="12" height="12" rx="3" fill="${color}" stroke="#09131a" stroke-width="2"></rect>
+            <text x="${x + 10}" y="${y + 5}" font-size="12" fill="#b7d8ee">${escapeHtml(node.id)}</text>
+          </g>`;
+      }).join('');
+
+      const mobMarkers = latestMobs.map(mob => {
+        const x = projectX(mob.positionX);
+        const y = projectY(mob.positionZ);
+        return `
+          <g>
+            <circle cx="${x}" cy="${y}" r="7" fill="#ff7d7d" stroke="#2a1010" stroke-width="2"></circle>
+            <text x="${x + 10}" y="${y + 4}" font-size="12" fill="#ffd5d5">${escapeHtml(mob.mobTypeId)} (${escapeHtml(mob.state)})</text>
+          </g>`;
+      }).join('');
+
       const playerDots = flattenedPlayers.map(player => {
         const state = classifyPlayer(player);
         if (state.kind === 'moving') movingCount++;
@@ -3161,32 +4389,43 @@ public sealed class ManagementDashboardHost
           <g data-session-id="${player.sessionId}" style="cursor:pointer">
             <circle cx="${x}" cy="${y}" r="${selected ? 13 : 10}" fill="${state.color}" stroke="${selected ? '#0a6c91' : '#fffaf1'}" stroke-width="${selected ? 4 : 3}"></circle>
             ${state.speed > 0.05 ? `<line x1="${x}" y1="${y}" x2="${x + dx}" y2="${y + dy}" stroke="${state.color}" stroke-width="3" stroke-linecap="round"></line>` : ''}
-            <text x="${x + 12}" y="${y - 12}" font-size="14" fill="#26170f">P${player.playerId}</text>
+            <text x="${x + 12}" y="${y - 12}" font-size="14" fill="#ecf6ff">P${player.playerId}</text>
           </g>`;
       }).join('');
 
       const axes = `
         <g opacity="0.55">
-          <text x="${pad}" y="${height - 10}" font-size="14" fill="#6a5547">X: ${world.minX.toFixed(0)} - ${world.maxX.toFixed(0)}</text>
-          <text x="${width - 180}" y="${height - 10}" font-size="14" fill="#6a5547">Z: ${world.minZ.toFixed(0)} - ${world.maxZ.toFixed(0)}</text>
+          <text x="${pad}" y="${height - 10}" font-size="14" fill="#8aa3b8">X: ${world.minX.toFixed(0)} - ${world.maxX.toFixed(0)}</text>
+          <text x="${width - 180}" y="${height - 10}" font-size="14" fill="#8aa3b8">Z: ${world.minZ.toFixed(0)} - ${world.maxZ.toFixed(0)}</text>
         </g>`;
 
-      svg.innerHTML = `${zoneRects}${trails}${eventMarkers}${playerDots}${axes}`;
+      svg.innerHTML = `${zoneRects}${trails}${eventMarkers}${nodeMarkers}${mobMarkers}${playerDots}${axes}`;
 
       document.getElementById('movingCount').textContent = movingCount;
       document.getElementById('idleCount').textContent = idleCount;
       document.getElementById('transferCount').textContent = transferCount;
       document.getElementById('ghostCount').textContent = ghostCount;
+      document.getElementById('mobCount').textContent = latestMobs.length;
+      document.getElementById('nodeCount').textContent = latestNodes.length;
       document.getElementById('zoneCount').textContent = zones.length;
       document.getElementById('updatedAt').textContent = new Date(snapshot.generatedAtUtc).toLocaleTimeString();
       document.getElementById('zoneList').innerHTML = zones.map(zone => `
         <div class="zone-item">
           <span>Zone ${zone.zoneId} ${escapeHtml(zone.name)}</span>
-          <span class="meta">${zone.players.length} players / ${zone.activeGhosts} ghosts</span>
+          <span class="meta">${(zone.players || []).length} players / ${zone.activeGhosts || 0} ghosts / ${(zone.mobs || []).length} mobs</span>
         </div>
         <div class="meta">Bounds X ${zone.minX.toFixed(0)}-${zone.maxX.toFixed(0)} / Z ${zone.minZ.toFixed(0)}-${zone.maxZ.toFixed(0)}</div>
-        <div class="meta">AOI ${zone.aoiRadius.toFixed(0)} / ghost margin ${zone.ghostMargin.toFixed(0)} / prewarm ${zone.prewarmMargin.toFixed(0)} / inset ${zone.transferInset.toFixed(0)}</div>`
+        <div class="meta">${escapeHtml(zone.lifecycleState || 'Unknown')} · ${escapeHtml(zone.runtimeMode || 'Unmanaged')}</div>
+        <div class="meta">AOI ${(zone.aoiRadius || 0).toFixed(0)} / ghost margin ${(zone.ghostMargin || 0).toFixed(0)} / prewarm ${(zone.prewarmMargin || 0).toFixed(0)} / inset ${(zone.transferInset || 0).toFixed(0)}</div>`
       ).join('');
+      document.getElementById('nodeList').innerHTML = latestNodes.length === 0
+        ? '<div class="empty">No resource node definitions found.</div>'
+        : latestNodes.map(node => `
+            <div class="zone-item">
+              <span>${escapeHtml(node.id)}</span>
+              <span class="meta">${escapeHtml(node.resourceId)} · zone ${node.zoneId}</span>
+            </div>
+            <div class="meta">Position ${fmt(node.positionX)}, ${fmt(node.positionZ)} · respawn ${node.respawnSeconds}s</div>`).join('');
 
       svg.querySelectorAll('[data-session-id]').forEach(node => {
         node.addEventListener('click', event => {
@@ -3214,9 +4453,13 @@ public sealed class ManagementDashboardHost
 
     async function refresh() {
       try {
-        const response = await fetch('/api/dashboard', { cache: 'no-store' });
-        const data = await response.json();
-        render(data);
+        const [dashboardResponse, definitionsResponse] = await Promise.all([
+          fetch('/api/dashboard', { cache: 'no-store' }),
+          fetch('/api/gameplay-definitions', { cache: 'no-store' })
+        ]);
+        const dashboard = await dashboardResponse.json();
+        const definitions = await definitionsResponse.json();
+        render(dashboard, definitions);
       } catch (error) {
         console.error(error);
       }

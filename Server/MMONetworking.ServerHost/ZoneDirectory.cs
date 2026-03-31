@@ -17,6 +17,9 @@ public sealed class ZoneDirectory
     public ZoneDefinition GetZone(int zoneId)
         => _zones[zoneId];
 
+    public bool HasZone(int zoneId)
+        => _zones.ContainsKey(zoneId);
+
     public IReadOnlyCollection<ZoneDefinition> All => _zones.Values.ToArray();
 
     public ZoneDefinition ResolveDestination(NetworkVector3 position, int currentZoneId)

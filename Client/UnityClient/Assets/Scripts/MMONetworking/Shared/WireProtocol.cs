@@ -8,7 +8,7 @@ namespace MMONetworking
 {
 public static class WireProtocol
 {
-    public const int CurrentProtocolVersion = 1;
+    public const int CurrentProtocolVersion = 2;
 
     public static async Task WriteTcpMessageAsync(Stream stream, TcpMessage message, CancellationToken cancellationToken = default)
     {
@@ -68,6 +68,8 @@ public static class WireProtocol
         {
             writer.Write(hello.ProtocolVersion);
             writer.Write(hello.AccountId);
+            writer.Write(hello.Password);
+            writer.Write((byte)hello.AuthMode);
             writer.Write(hello.RequestedZoneId);
             return;
         }
@@ -132,6 +134,14 @@ public static class WireProtocol
         if (message is ErrorMessage error)
         {
             writer.Write(error.Text);
+            return;
+        }
+
+        if (message is DisconnectNoticeMessage disconnect)
+        {
+            writer.Write(disconnect.Reason);
+            writer.Write(disconnect.CanReconnect);
+            writer.Write(disconnect.GraceSeconds);
             return;
         }
 
@@ -233,7 +243,7 @@ public static class WireProtocol
         switch (kind)
         {
             case TcpMessageKind.ClientHello:
-                return new ClientHelloMessage(reader.ReadInt32(), reader.ReadString(), reader.ReadInt32());
+                return new ClientHelloMessage(reader.ReadInt32(), reader.ReadString(), reader.ReadString(), (AccountAuthMode)reader.ReadByte(), reader.ReadInt32());
             case TcpMessageKind.HelloAccepted:
                 return new HelloAcceptedMessage(ReadGuid(reader), reader.ReadUInt64(), reader.ReadInt32(), reader.ReadString(), reader.ReadInt32(), reader.ReadInt32(), reader.ReadString(), reader.ReadInt32());
             case TcpMessageKind.AttachToZone:
@@ -248,6 +258,8 @@ public static class WireProtocol
                 return new HeartbeatMessage(reader.ReadInt64());
             case TcpMessageKind.Error:
                 return new ErrorMessage(reader.ReadString());
+            case TcpMessageKind.DisconnectNotice:
+                return new DisconnectNoticeMessage(reader.ReadString(), reader.ReadBoolean(), reader.ReadInt32());
             case TcpMessageKind.ZoneAttachAuthorize:
                 return new ZoneAttachAuthorizeMessage(ReadGuid(reader), reader.ReadUInt64(), reader.ReadInt32(), reader.ReadString());
             case TcpMessageKind.ZoneAttachAuthorized:
@@ -295,6 +307,26 @@ public static class WireProtocol
                 WriteVector3(writer, player.Velocity);
                 writer.Write((byte)player.Kind);
                 writer.Write(player.SourceZoneId);
+            }
+            writer.Write(snapshot.ResourceNodes.Length);
+            for (var i = 0; i < snapshot.ResourceNodes.Length; i++)
+            {
+                var node = snapshot.ResourceNodes[i];
+                writer.Write(node.NodeId);
+                writer.Write(node.ResourceId);
+                WriteVector3(writer, node.Position);
+                writer.Write(node.Remaining);
+                writer.Write(node.MaxAmount);
+            }
+            writer.Write(snapshot.Mobs.Length);
+            for (var i = 0; i < snapshot.Mobs.Length; i++)
+            {
+                var mob = snapshot.Mobs[i];
+                writer.Write(mob.MobId);
+                writer.Write(mob.MobTypeId);
+                WriteVector3(writer, mob.Position);
+                WriteVector3(writer, mob.Velocity);
+                writer.Write(mob.State);
             }
 
             return;
@@ -350,7 +382,31 @@ public static class WireProtocol
                 reader.ReadInt32());
         }
 
-        return new WorldSnapshotMessage(zoneId, tick, players);
+        var nodeCount = reader.ReadInt32();
+        var nodes = new ResourceNodeSnapshot[nodeCount];
+        for (var i = 0; i < nodeCount; i++)
+        {
+            nodes[i] = new ResourceNodeSnapshot(
+                reader.ReadString(),
+                reader.ReadString(),
+                ReadVector3(reader),
+                reader.ReadInt32(),
+                reader.ReadInt32());
+        }
+
+        var mobCount = reader.ReadInt32();
+        var mobs = new MobSnapshot[mobCount];
+        for (var i = 0; i < mobCount; i++)
+        {
+            mobs[i] = new MobSnapshot(
+                reader.ReadString(),
+                reader.ReadString(),
+                ReadVector3(reader),
+                ReadVector3(reader),
+                reader.ReadString());
+        }
+
+        return new WorldSnapshotMessage(zoneId, tick, players, nodes, mobs);
     }
 
     private static async Task<byte[]> ReadExactAsync(Stream stream, int byteCount, CancellationToken cancellationToken)

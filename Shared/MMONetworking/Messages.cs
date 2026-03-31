@@ -12,6 +12,7 @@ public enum TcpMessageKind : ushort
     ZoneTransferCommitted = 6,
     Heartbeat = 7,
     Error = 8,
+    DisconnectNotice = 9,
     ZoneAttachAuthorize = 100,
     ZoneAttachAuthorized = 101,
     ZoneStateUpdate = 102,
@@ -19,6 +20,8 @@ public enum TcpMessageKind : ushort
     ZoneTransferResponse = 104,
     ZonePrewarmRequest = 105,
     ZonePrewarmResponse = 106,
+    ZoneMobStateUpdate = 107,
+    ZoneStateBatchUpdate = 108,
     GameplayCommand = 200,
     GameplayResult = 201
 }
@@ -35,7 +38,13 @@ public abstract record TcpMessage(TcpMessageKind Kind);
 
 public abstract record UdpMessage(UdpMessageKind Kind);
 
-public sealed record ClientHelloMessage(int ProtocolVersion, string AccountId, int RequestedZoneId)
+public enum AccountAuthMode : byte
+{
+    Login = 1,
+    Register = 2
+}
+
+public sealed record ClientHelloMessage(int ProtocolVersion, string AccountId, string Password, AccountAuthMode AuthMode, int RequestedZoneId)
     : TcpMessage(TcpMessageKind.ClientHello);
 
 public sealed record HelloAcceptedMessage(
@@ -76,6 +85,9 @@ public sealed record HeartbeatMessage(long ServerTicks)
 public sealed record ErrorMessage(string Text)
     : TcpMessage(TcpMessageKind.Error);
 
+public sealed record DisconnectNoticeMessage(string Reason, bool CanReconnect, int GraceSeconds)
+    : TcpMessage(TcpMessageKind.DisconnectNotice);
+
 public sealed record ZoneAttachAuthorizeMessage(Guid SessionId, ulong PlayerId, int ZoneId, string TransferToken)
     : TcpMessage(TcpMessageKind.ZoneAttachAuthorize);
 
@@ -107,6 +119,12 @@ public sealed record ZonePrewarmRequestMessage(Guid SessionId, int ZoneId, Netwo
 public sealed record ZonePrewarmResponseMessage(bool Started, Guid SessionId, int ZoneId, int DestinationZoneId, string ErrorText)
     : TcpMessage(TcpMessageKind.ZonePrewarmResponse);
 
+public sealed record ZoneMobStateUpdateMessage(int ZoneId, MobSnapshot[] Mobs)
+    : TcpMessage(TcpMessageKind.ZoneMobStateUpdate);
+
+public sealed record ZoneStateBatchUpdateMessage(int ZoneId, ZonePlayerStateUpdate[] Players)
+    : TcpMessage(TcpMessageKind.ZoneStateBatchUpdate);
+
 public enum GameplayCommandKind : byte
 {
     Gather = 1,
@@ -133,7 +151,7 @@ public sealed record GameplayResultMessage(
 public sealed record ClientInputMessage(Guid SessionId, uint Sequence, NetworkVector3 Move, float DeltaTimeSeconds)
     : UdpMessage(UdpMessageKind.ClientInput);
 
-public sealed record WorldSnapshotMessage(int ZoneId, uint Tick, PlayerSnapshot[] Players)
+public sealed record WorldSnapshotMessage(int ZoneId, uint Tick, PlayerSnapshot[] Players, ResourceNodeSnapshot[] ResourceNodes, MobSnapshot[] Mobs)
     : UdpMessage(UdpMessageKind.WorldSnapshot);
 
 public sealed record TransferProbeMessage(Guid SessionId, string TransferToken)

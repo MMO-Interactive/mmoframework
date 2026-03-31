@@ -15,18 +15,18 @@ public sealed class InvasionStore
         EnsureSchema();
     }
 
-    public InvasionBoardSnapshot GetBoard(string accountId)
+    public InvasionBoardSnapshot GetBoard(ulong characterId)
     {
-        if (string.IsNullOrWhiteSpace(accountId))
+        if (characterId == 0)
         {
-            throw new InvalidOperationException("accountId is required.");
+            throw new InvalidOperationException("characterId is required.");
         }
 
         lock (_sync)
         {
             using var connection = new SqliteConnection(_connectionString);
             connection.Open();
-            return LoadBoard(connection, accountId.Trim());
+            return LoadBoard(connection, characterId);
         }
     }
 
@@ -70,8 +70,8 @@ public sealed class InvasionStore
             command.Parameters.AddWithValue("$ends", invasion.EndsAtUtc.ToString("O"));
             command.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
             command.ExecuteNonQuery();
-            InsertLog(connection, null, invasion.InvasionId.Trim(), "__system__", "upsert", "Upserted invasion.");
-            return LoadBoard(connection, "__all__");
+            InsertLog(connection, null, invasion.InvasionId.Trim(), 0UL, "upsert", "Upserted invasion.");
+            return LoadBoard(connection, null);
         }
     }
 
@@ -109,17 +109,17 @@ public sealed class InvasionStore
                 command.ExecuteNonQuery();
             }
 
-            InsertLog(connection, tx, invasionId.Trim(), "__system__", "wave_advance", $"Advanced to wave {nextWave}.");
+            InsertLog(connection, tx, invasionId.Trim(), 0UL, "wave_advance", $"Advanced to wave {nextWave}.");
             tx.Commit();
-            return LoadBoard(connection, "__all__");
+            return LoadBoard(connection, null);
         }
     }
 
-    public InvasionBoardSnapshot RecordKill(string invasionId, string accountId, int kills)
+    public InvasionBoardSnapshot RecordKill(string invasionId, ulong characterId, int kills)
     {
-        if (string.IsNullOrWhiteSpace(invasionId) || string.IsNullOrWhiteSpace(accountId))
+        if (string.IsNullOrWhiteSpace(invasionId) || characterId == 0)
         {
-            throw new InvalidOperationException("invasionId and accountId are required.");
+            throw new InvalidOperationException("invasionId and characterId are required.");
         }
 
         lock (_sync)
@@ -129,27 +129,27 @@ public sealed class InvasionStore
             using var command = connection.CreateCommand();
             command.CommandText =
                 """
-                INSERT INTO invasion_contributions(invasion_id, account_id, kills, is_claimed, updated_at_utc)
-                VALUES($id, $account, $kills, 0, $updated)
-                ON CONFLICT(invasion_id, account_id) DO UPDATE SET
+                INSERT INTO invasion_contributions(invasion_id, character_id, kills, is_claimed, updated_at_utc)
+                VALUES($id, $characterId, $kills, 0, $updated)
+                ON CONFLICT(invasion_id, character_id) DO UPDATE SET
                     kills = kills + excluded.kills,
                     updated_at_utc = excluded.updated_at_utc;
                 """;
             command.Parameters.AddWithValue("$id", invasionId.Trim());
-            command.Parameters.AddWithValue("$account", accountId.Trim());
+            command.Parameters.AddWithValue("$characterId", unchecked((long)characterId));
             command.Parameters.AddWithValue("$kills", Math.Max(1, kills));
             command.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
             command.ExecuteNonQuery();
-            InsertLog(connection, null, invasionId.Trim(), accountId.Trim(), "kill_credit", $"Added {Math.Max(1, kills)} kill credit.");
-            return LoadBoard(connection, accountId.Trim());
+            InsertLog(connection, null, invasionId.Trim(), characterId, "kill_credit", $"Added {Math.Max(1, kills)} kill credit.");
+            return LoadBoard(connection, characterId);
         }
     }
 
-    public InvasionClaimSnapshot Claim(string invasionId, string accountId)
+    public InvasionClaimSnapshot Claim(string invasionId, ulong characterId)
     {
-        if (string.IsNullOrWhiteSpace(invasionId) || string.IsNullOrWhiteSpace(accountId))
+        if (string.IsNullOrWhiteSpace(invasionId) || characterId == 0)
         {
-            throw new InvalidOperationException("invasionId and accountId are required.");
+            throw new InvalidOperationException("invasionId and characterId are required.");
         }
 
         lock (_sync)
@@ -163,7 +163,7 @@ public sealed class InvasionStore
                 throw new InvalidOperationException("Invasion must be resolved before claiming.");
             }
 
-            var contribution = LoadContribution(connection, tx, invasionId.Trim(), accountId.Trim()) ?? throw new InvalidOperationException("No contribution found.");
+            var contribution = LoadContribution(connection, tx, invasionId.Trim(), characterId) ?? throw new InvalidOperationException("No contribution found.");
             if (contribution.IsClaimed)
             {
                 throw new InvalidOperationException("Invasion rewards already claimed.");
@@ -172,22 +172,22 @@ public sealed class InvasionStore
             using (var command = connection.CreateCommand())
             {
                 command.Transaction = tx;
-                command.CommandText = "UPDATE invasion_contributions SET is_claimed = 1, updated_at_utc = $updated WHERE invasion_id = $id AND account_id = $account;";
+                command.CommandText = "UPDATE invasion_contributions SET is_claimed = 1, updated_at_utc = $updated WHERE invasion_id = $id AND character_id = $characterId;";
                 command.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
                 command.Parameters.AddWithValue("$id", invasionId.Trim());
-                command.Parameters.AddWithValue("$account", accountId.Trim());
+                command.Parameters.AddWithValue("$characterId", unchecked((long)characterId));
                 command.ExecuteNonQuery();
             }
-            InsertLog(connection, tx, invasionId.Trim(), accountId.Trim(), "claim", $"Claimed with {contribution.Kills} kill credit.");
+            InsertLog(connection, tx, invasionId.Trim(), characterId, "claim", $"Claimed with {contribution.Kills} kill credit.");
             tx.Commit();
 
             var xp = Math.Max(20, contribution.Kills * 10 + invasion.ThreatLevel * 20);
             var rep = Math.Max(5, contribution.Kills / 2 + invasion.ThreatLevel);
-            return new InvasionClaimSnapshot(invasionId.Trim(), accountId.Trim(), contribution.Kills, xp, "defenders", rep, $"Claimed invasion rewards for {invasionId}.");
+            return new InvasionClaimSnapshot(invasionId.Trim(), characterId, contribution.Kills, xp, "defenders", rep, $"Claimed invasion rewards for {invasionId}.");
         }
     }
 
-    private static InvasionBoardSnapshot LoadBoard(SqliteConnection connection, string accountId)
+    private static InvasionBoardSnapshot LoadBoard(SqliteConnection connection, ulong? characterId)
     {
         var invasions = new List<InvasionSnapshot>();
         using (var command = connection.CreateCommand())
@@ -215,23 +215,23 @@ public sealed class InvasionStore
         }
 
         var contributions = new List<InvasionContributionSnapshot>();
-        if (!string.Equals(accountId, "__all__", StringComparison.Ordinal))
+        if (characterId.HasValue)
         {
             using var command = connection.CreateCommand();
             command.CommandText =
                 """
-                SELECT invasion_id, account_id, kills, is_claimed, updated_at_utc
+                SELECT invasion_id, character_id, kills, is_claimed, updated_at_utc
                 FROM invasion_contributions
-                WHERE account_id = $account
+                WHERE character_id = $characterId
                 ORDER BY invasion_id;
                 """;
-            command.Parameters.AddWithValue("$account", accountId);
+            command.Parameters.AddWithValue("$characterId", unchecked((long)characterId.Value));
             using var reader = command.ExecuteReader();
             while (reader.Read())
             {
                 contributions.Add(new InvasionContributionSnapshot(
                     reader.GetString(0),
-                    reader.GetString(1),
+                    reader.IsDBNull(1) ? 0UL : (ulong)reader.GetInt64(1),
                     reader.GetInt32(2),
                     reader.GetInt32(3) != 0,
                     DateTimeOffset.Parse(reader.GetString(4))));
@@ -243,7 +243,7 @@ public sealed class InvasionStore
         {
             command.CommandText =
                 """
-                SELECT id, invasion_id, account_id, action_type, details, created_at_utc
+                SELECT id, invasion_id, character_id, action_type, details, created_at_utc
                 FROM invasion_logs
                 ORDER BY id DESC
                 LIMIT 120;
@@ -254,27 +254,27 @@ public sealed class InvasionStore
                 logs.Add(new InvasionLogSnapshot(
                     reader.GetInt64(0),
                     reader.GetString(1),
-                    reader.GetString(2),
+                    reader.IsDBNull(2) ? 0UL : (ulong)reader.GetInt64(2),
                     reader.GetString(3),
                     reader.GetString(4),
                     DateTimeOffset.Parse(reader.GetString(5))));
             }
         }
 
-        return new InvasionBoardSnapshot(accountId, invasions.ToArray(), contributions.ToArray(), logs.ToArray());
+        return new InvasionBoardSnapshot(characterId ?? 0UL, invasions.ToArray(), contributions.ToArray(), logs.ToArray());
     }
 
-    private static void InsertLog(SqliteConnection connection, SqliteTransaction? tx, string invasionId, string accountId, string actionType, string details)
+    private static void InsertLog(SqliteConnection connection, SqliteTransaction? tx, string invasionId, ulong characterId, string actionType, string details)
     {
         using var command = connection.CreateCommand();
         command.Transaction = tx;
         command.CommandText =
             """
-            INSERT INTO invasion_logs(invasion_id, account_id, action_type, details, created_at_utc)
-            VALUES($id, $account, $actionType, $details, $created);
+            INSERT INTO invasion_logs(invasion_id, character_id, action_type, details, created_at_utc)
+            VALUES($id, $characterId, $actionType, $details, $created);
             """;
         command.Parameters.AddWithValue("$id", invasionId);
-        command.Parameters.AddWithValue("$account", accountId);
+        command.Parameters.AddWithValue("$characterId", characterId == 0 ? DBNull.Value : unchecked((long)characterId));
         command.Parameters.AddWithValue("$actionType", actionType);
         command.Parameters.AddWithValue("$details", details);
         command.Parameters.AddWithValue("$created", DateTimeOffset.UtcNow.ToString("O"));
@@ -311,7 +311,7 @@ public sealed class InvasionStore
             DateTimeOffset.Parse(reader.GetString(8)));
     }
 
-    private static InvasionContributionSnapshot? LoadContribution(SqliteConnection connection, SqliteTransaction tx, string invasionId, string accountId)
+    private static InvasionContributionSnapshot? LoadContribution(SqliteConnection connection, SqliteTransaction tx, string invasionId, ulong characterId)
     {
         using var command = connection.CreateCommand();
         command.Transaction = tx;
@@ -319,11 +319,11 @@ public sealed class InvasionStore
             """
             SELECT kills, is_claimed, updated_at_utc
             FROM invasion_contributions
-            WHERE invasion_id = $id AND account_id = $account
+            WHERE invasion_id = $id AND character_id = $characterId
             LIMIT 1;
             """;
         command.Parameters.AddWithValue("$id", invasionId);
-        command.Parameters.AddWithValue("$account", accountId);
+        command.Parameters.AddWithValue("$characterId", unchecked((long)characterId));
         using var reader = command.ExecuteReader();
         if (!reader.Read())
         {
@@ -332,7 +332,7 @@ public sealed class InvasionStore
 
         return new InvasionContributionSnapshot(
             invasionId,
-            accountId,
+            characterId,
             reader.GetInt32(0),
             reader.GetInt32(1) != 0,
             DateTimeOffset.Parse(reader.GetString(2)));
@@ -368,6 +368,7 @@ public sealed class InvasionStore
                 CREATE TABLE IF NOT EXISTS invasion_contributions (
                     invasion_id TEXT NOT NULL,
                     account_id TEXT NOT NULL,
+                    character_id INTEGER NULL,
                     kills INTEGER NOT NULL,
                     is_claimed INTEGER NOT NULL,
                     updated_at_utc TEXT NOT NULL,
@@ -384,10 +385,50 @@ public sealed class InvasionStore
                     id INTEGER PRIMARY KEY AUTOINCREMENT,
                     invasion_id TEXT NOT NULL,
                     account_id TEXT NOT NULL,
+                    character_id INTEGER NULL,
                     action_type TEXT NOT NULL,
                     details TEXT NOT NULL,
                     created_at_utc TEXT NOT NULL
                 );
+                """;
+            command.ExecuteNonQuery();
+        }
+
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText =
+                """
+                UPDATE invasion_contributions
+                SET character_id = (
+                    SELECT primary_character_id
+                    FROM accounts
+                    WHERE accounts.account_id = invasion_contributions.account_id
+                )
+                WHERE character_id IS NULL;
+                """;
+            command.ExecuteNonQuery();
+        }
+
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText =
+                """
+                UPDATE invasion_logs
+                SET character_id = (
+                    SELECT primary_character_id
+                    FROM accounts
+                    WHERE accounts.account_id = invasion_logs.account_id
+                )
+                WHERE character_id IS NULL;
+                """;
+            command.ExecuteNonQuery();
+        }
+
+        using (var command = connection.CreateCommand())
+        {
+            command.CommandText = """
+                CREATE UNIQUE INDEX IF NOT EXISTS ix_invasion_contributions_invasion_character
+                ON invasion_contributions(invasion_id, character_id);
                 """;
             command.ExecuteNonQuery();
         }

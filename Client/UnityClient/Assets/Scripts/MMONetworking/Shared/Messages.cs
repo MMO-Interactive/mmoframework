@@ -12,6 +12,7 @@ public enum TcpMessageKind : ushort
     ZoneTransferCommitted = 6,
     Heartbeat = 7,
     Error = 8,
+    DisconnectNotice = 9,
     ZoneAttachAuthorize = 100,
     ZoneAttachAuthorized = 101,
     ZoneStateUpdate = 102,
@@ -43,17 +44,27 @@ public abstract class UdpMessage
     public UdpMessageKind Kind { get; }
 }
 
+public enum AccountAuthMode : byte
+{
+    Login = 1,
+    Register = 2
+}
+
 public sealed class ClientHelloMessage : TcpMessage
 {
-    public ClientHelloMessage(int protocolVersion, string accountId, int requestedZoneId) : base(TcpMessageKind.ClientHello)
+    public ClientHelloMessage(int protocolVersion, string accountId, string password, AccountAuthMode authMode, int requestedZoneId) : base(TcpMessageKind.ClientHello)
     {
         ProtocolVersion = protocolVersion;
         AccountId = accountId;
+        Password = password;
+        AuthMode = authMode;
         RequestedZoneId = requestedZoneId;
     }
 
     public int ProtocolVersion { get; }
     public string AccountId { get; }
+    public string Password { get; }
+    public AccountAuthMode AuthMode { get; }
     public int RequestedZoneId { get; }
 }
 
@@ -161,6 +172,20 @@ public sealed class ErrorMessage : TcpMessage
 {
     public ErrorMessage(string text) : base(TcpMessageKind.Error) => Text = text;
     public string Text { get; }
+}
+
+public sealed class DisconnectNoticeMessage : TcpMessage
+{
+    public DisconnectNoticeMessage(string reason, bool canReconnect, int graceSeconds) : base(TcpMessageKind.DisconnectNotice)
+    {
+        Reason = reason;
+        CanReconnect = canReconnect;
+        GraceSeconds = graceSeconds;
+    }
+
+    public string Reason { get; }
+    public bool CanReconnect { get; }
+    public int GraceSeconds { get; }
 }
 
 public sealed class ZoneAttachAuthorizeMessage : TcpMessage
@@ -350,16 +375,20 @@ public sealed class ClientInputMessage : UdpMessage
 
 public sealed class WorldSnapshotMessage : UdpMessage
 {
-    public WorldSnapshotMessage(int zoneId, uint tick, PlayerSnapshot[] players) : base(UdpMessageKind.WorldSnapshot)
+    public WorldSnapshotMessage(int zoneId, uint tick, PlayerSnapshot[] players, ResourceNodeSnapshot[] resourceNodes, MobSnapshot[] mobs) : base(UdpMessageKind.WorldSnapshot)
     {
         ZoneId = zoneId;
         Tick = tick;
         Players = players;
+        ResourceNodes = resourceNodes;
+        Mobs = mobs;
     }
 
     public int ZoneId { get; }
     public uint Tick { get; }
     public PlayerSnapshot[] Players { get; }
+    public ResourceNodeSnapshot[] ResourceNodes { get; }
+    public MobSnapshot[] Mobs { get; }
 }
 
 public sealed class TransferProbeMessage : UdpMessage

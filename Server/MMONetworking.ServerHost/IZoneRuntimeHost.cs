@@ -12,5 +12,6 @@ public interface IZoneRuntimeHost : IDisposable
     Task RunAsync(CancellationToken cancellationToken);
     ZoneRuntimeSnapshot CreateDashboardSnapshot(string lifecycleState, DateTimeOffset lastStateChangeUtc, DateTimeOffset? idleSinceUtc);
     void ReportPlayerState(Guid sessionId, ulong playerId, NetworkVector3 position, NetworkVector3 velocity);
+    void ReportMobStates(MobSnapshot[] mobs);
     void RemovePlayer(Guid sessionId);
 }

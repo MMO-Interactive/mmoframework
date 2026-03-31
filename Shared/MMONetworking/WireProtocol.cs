@@ -8,7 +8,7 @@ namespace MMONetworking;
 
 public static class WireProtocol
 {
-    public const int CurrentProtocolVersion = 1;
+    public const int CurrentProtocolVersion = 2;
 
     public static async Task WriteTcpMessageAsync(Stream stream, TcpMessage message, CancellationToken cancellationToken = default)
     {
@@ -61,6 +61,8 @@ public static class WireProtocol
             case ClientHelloMessage hello:
                 writer.Write(hello.ProtocolVersion);
                 writer.Write(hello.AccountId);
+                writer.Write(hello.Password);
+                writer.Write((byte)hello.AuthMode);
                 writer.Write(hello.RequestedZoneId);
                 break;
             case HelloAcceptedMessage accepted:
@@ -104,6 +106,11 @@ public static class WireProtocol
                 break;
             case ErrorMessage error:
                 writer.Write(error.Text);
+                break;
+            case DisconnectNoticeMessage disconnect:
+                writer.Write(disconnect.Reason);
+                writer.Write(disconnect.CanReconnect);
+                writer.Write(disconnect.GraceSeconds);
                 break;
             case ZoneAttachAuthorizeMessage authorize:
                 WriteGuid(writer, authorize.SessionId);
@@ -153,6 +160,29 @@ public static class WireProtocol
                 writer.Write(prewarmResponse.DestinationZoneId);
                 writer.Write(prewarmResponse.ErrorText);
                 break;
+            case ZoneMobStateUpdateMessage mobStateUpdate:
+                writer.Write(mobStateUpdate.ZoneId);
+                writer.Write(mobStateUpdate.Mobs.Length);
+                foreach (var mob in mobStateUpdate.Mobs)
+                {
+                    writer.Write(mob.MobId);
+                    writer.Write(mob.MobTypeId);
+                    WriteVector3(writer, mob.Position);
+                    WriteVector3(writer, mob.Velocity);
+                    writer.Write(mob.State);
+                }
+                break;
+            case ZoneStateBatchUpdateMessage stateBatch:
+                writer.Write(stateBatch.ZoneId);
+                writer.Write(stateBatch.Players.Length);
+                foreach (var player in stateBatch.Players)
+                {
+                    WriteGuid(writer, player.SessionId);
+                    writer.Write(player.PlayerId);
+                    WriteVector3(writer, player.Position);
+                    WriteVector3(writer, player.Velocity);
+                }
+                break;
             case GameplayCommandMessage gameplayCommand:
                 WriteGuid(writer, gameplayCommand.SessionId);
                 writer.Write(gameplayCommand.CommandId);
@@ -180,6 +210,8 @@ public static class WireProtocol
             TcpMessageKind.ClientHello => new ClientHelloMessage(
                 reader.ReadInt32(),
                 reader.ReadString(),
+                reader.ReadString(),
+                (AccountAuthMode)reader.ReadByte(),
                 reader.ReadInt32()),
             TcpMessageKind.HelloAccepted => new HelloAcceptedMessage(
                 ReadGuid(reader),
@@ -214,6 +246,10 @@ public static class WireProtocol
                 reader.ReadInt32()),
             TcpMessageKind.Heartbeat => new HeartbeatMessage(reader.ReadInt64()),
             TcpMessageKind.Error => new ErrorMessage(reader.ReadString()),
+            TcpMessageKind.DisconnectNotice => new DisconnectNoticeMessage(
+                reader.ReadString(),
+                reader.ReadBoolean(),
+                reader.ReadInt32()),
             TcpMessageKind.ZoneAttachAuthorize => new ZoneAttachAuthorizeMessage(
                 ReadGuid(reader),
                 reader.ReadUInt64(),
@@ -255,6 +291,8 @@ public static class WireProtocol
                 reader.ReadInt32(),
                 reader.ReadInt32(),
                 reader.ReadString()),
+            TcpMessageKind.ZoneMobStateUpdate => ReadZoneMobStateUpdate(reader),
+            TcpMessageKind.ZoneStateBatchUpdate => ReadZoneStateBatchUpdate(reader),
             TcpMessageKind.GameplayCommand => new GameplayCommandMessage(
                 ReadGuid(reader),
                 reader.ReadUInt32(),
@@ -293,6 +331,24 @@ public static class WireProtocol
                     WriteVector3(writer, player.Velocity);
                     writer.Write((byte)player.Kind);
                     writer.Write(player.SourceZoneId);
+                }
+                writer.Write(snapshot.ResourceNodes.Length);
+                foreach (var node in snapshot.ResourceNodes)
+                {
+                    writer.Write(node.NodeId);
+                    writer.Write(node.ResourceId);
+                    WriteVector3(writer, node.Position);
+                    writer.Write(node.Remaining);
+                    writer.Write(node.MaxAmount);
+                }
+                writer.Write(snapshot.Mobs.Length);
+                foreach (var mob in snapshot.Mobs)
+                {
+                    writer.Write(mob.MobId);
+                    writer.Write(mob.MobTypeId);
+                    WriteVector3(writer, mob.Position);
+                    WriteVector3(writer, mob.Velocity);
+                    writer.Write(mob.State);
                 }
 
                 break;
@@ -345,7 +401,66 @@ public static class WireProtocol
                 reader.ReadInt32());
         }
 
-        return new WorldSnapshotMessage(zoneId, tick, players);
+        var nodeCount = reader.ReadInt32();
+        var nodes = new ResourceNodeSnapshot[nodeCount];
+        for (var i = 0; i < nodeCount; i++)
+        {
+            nodes[i] = new ResourceNodeSnapshot(
+                reader.ReadString(),
+                reader.ReadString(),
+                ReadVector3(reader),
+                reader.ReadInt32(),
+                reader.ReadInt32());
+        }
+
+        var mobCount = reader.ReadInt32();
+        var mobs = new MobSnapshot[mobCount];
+        for (var i = 0; i < mobCount; i++)
+        {
+            mobs[i] = new MobSnapshot(
+                reader.ReadString(),
+                reader.ReadString(),
+                ReadVector3(reader),
+                ReadVector3(reader),
+                reader.ReadString());
+        }
+
+        return new WorldSnapshotMessage(zoneId, tick, players, nodes, mobs);
+    }
+
+    private static ZoneMobStateUpdateMessage ReadZoneMobStateUpdate(BinaryReader reader)
+    {
+        var zoneId = reader.ReadInt32();
+        var count = reader.ReadInt32();
+        var mobs = new MobSnapshot[count];
+        for (var i = 0; i < count; i++)
+        {
+            mobs[i] = new MobSnapshot(
+                reader.ReadString(),
+                reader.ReadString(),
+                ReadVector3(reader),
+                ReadVector3(reader),
+                reader.ReadString());
+        }
+
+        return new ZoneMobStateUpdateMessage(zoneId, mobs);
+    }
+
+    private static ZoneStateBatchUpdateMessage ReadZoneStateBatchUpdate(BinaryReader reader)
+    {
+        var zoneId = reader.ReadInt32();
+        var count = reader.ReadInt32();
+        var players = new ZonePlayerStateUpdate[count];
+        for (var i = 0; i < count; i++)
+        {
+            players[i] = new ZonePlayerStateUpdate(
+                ReadGuid(reader),
+                reader.ReadUInt64(),
+                ReadVector3(reader),
+                ReadVector3(reader));
+        }
+
+        return new ZoneStateBatchUpdateMessage(zoneId, players);
     }
 
     private static async Task<byte[]> ReadExactAsync(Stream stream, int byteCount, CancellationToken cancellationToken)

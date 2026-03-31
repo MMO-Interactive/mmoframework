@@ -16,11 +16,11 @@ public sealed class CharacterProgressionStore
         EnsureSchema();
     }
 
-    public CharacterProgressionSnapshot Get(string accountId)
+    public CharacterProgressionSnapshot Get(ulong characterId)
     {
-        if (string.IsNullOrWhiteSpace(accountId))
+        if (characterId == 0)
         {
-            throw new InvalidOperationException("accountId is required.");
+            throw new InvalidOperationException("characterId is required.");
         }
 
         lock (_sync)
@@ -28,8 +28,8 @@ public sealed class CharacterProgressionStore
             using var connection = new SqliteConnection(_connectionString);
             connection.Open();
             using var command = connection.CreateCommand();
-            command.CommandText = "SELECT track_id, level, experience FROM character_progression WHERE account_id = $account ORDER BY track_id;";
-            command.Parameters.AddWithValue("$account", accountId);
+            command.CommandText = "SELECT track_id, level, experience FROM character_progression WHERE character_id = $character ORDER BY track_id;";
+            command.Parameters.AddWithValue("$character", unchecked((long)characterId));
             using var reader = command.ExecuteReader();
             var tracks = new List<ProgressionTrackSnapshot>();
             while (reader.Read())
@@ -39,11 +39,11 @@ public sealed class CharacterProgressionStore
                 tracks.Add(new ProgressionTrackSnapshot(reader.GetString(0), level, xp, ExperienceRequiredForLevel(level + 1)));
             }
 
-            return new CharacterProgressionSnapshot(accountId, tracks.ToArray());
+            return new CharacterProgressionSnapshot(characterId, tracks.ToArray());
         }
     }
 
-    public CharacterProgressionSnapshot GrantExperience(string accountId, string trackId, int xpDelta)
+    public CharacterProgressionSnapshot GrantExperience(ulong characterId, string trackId, int xpDelta)
     {
         if (xpDelta <= 0)
         {
@@ -56,7 +56,7 @@ public sealed class CharacterProgressionStore
             connection.Open();
             using var tx = connection.BeginTransaction();
 
-            var (level, xp) = LoadTrack(connection, tx, accountId, trackId);
+            var (level, xp) = LoadTrack(connection, tx, characterId, trackId);
             xp += xpDelta;
             var nextLevelXp = ExperienceRequiredForLevel(level + 1);
             while (xp >= nextLevelXp)
@@ -70,14 +70,14 @@ public sealed class CharacterProgressionStore
             upsert.Transaction = tx;
             upsert.CommandText =
                 """
-                INSERT INTO character_progression(account_id, track_id, level, experience, updated_at_utc)
-                VALUES ($account, $track, $level, $xp, $updated)
-                ON CONFLICT(account_id, track_id) DO UPDATE SET
+                INSERT INTO character_progression(character_id, track_id, level, experience, updated_at_utc)
+                VALUES ($character, $track, $level, $xp, $updated)
+                ON CONFLICT(character_id, track_id) DO UPDATE SET
                     level = excluded.level,
                     experience = excluded.experience,
                     updated_at_utc = excluded.updated_at_utc;
                 """;
-            upsert.Parameters.AddWithValue("$account", accountId);
+            upsert.Parameters.AddWithValue("$character", unchecked((long)characterId));
             upsert.Parameters.AddWithValue("$track", trackId);
             upsert.Parameters.AddWithValue("$level", level);
             upsert.Parameters.AddWithValue("$xp", xp);
@@ -86,15 +86,15 @@ public sealed class CharacterProgressionStore
             tx.Commit();
         }
 
-        return Get(accountId);
+        return Get(characterId);
     }
 
-    private static (int Level, int Experience) LoadTrack(SqliteConnection connection, SqliteTransaction tx, string accountId, string trackId)
+    private static (int Level, int Experience) LoadTrack(SqliteConnection connection, SqliteTransaction tx, ulong characterId, string trackId)
     {
         using var command = connection.CreateCommand();
         command.Transaction = tx;
-        command.CommandText = "SELECT level, experience FROM character_progression WHERE account_id = $account AND track_id = $track LIMIT 1;";
-        command.Parameters.AddWithValue("$account", accountId);
+        command.CommandText = "SELECT level, experience FROM character_progression WHERE character_id = $character AND track_id = $track LIMIT 1;";
+        command.Parameters.AddWithValue("$character", unchecked((long)characterId));
         command.Parameters.AddWithValue("$track", trackId);
         using var reader = command.ExecuteReader();
         if (!reader.Read())
@@ -120,6 +120,7 @@ public sealed class CharacterProgressionStore
             """
             CREATE TABLE IF NOT EXISTS character_progression (
                 account_id TEXT NOT NULL,
+                character_id INTEGER NULL,
                 track_id TEXT NOT NULL,
                 level INTEGER NOT NULL,
                 experience INTEGER NOT NULL,
@@ -128,5 +129,26 @@ public sealed class CharacterProgressionStore
             );
             """;
         command.ExecuteNonQuery();
+
+        using (var migrate = connection.CreateCommand())
+        {
+            migrate.CommandText =
+                """
+                UPDATE character_progression
+                SET character_id = (
+                    SELECT primary_character_id
+                    FROM accounts
+                    WHERE accounts.account_id = character_progression.account_id
+                )
+                WHERE character_id IS NULL;
+                """;
+            migrate.ExecuteNonQuery();
+        }
+
+        using (var index = connection.CreateCommand())
+        {
+            index.CommandText = "CREATE UNIQUE INDEX IF NOT EXISTS ix_character_progression_character_track ON character_progression(character_id, track_id);";
+            index.ExecuteNonQuery();
+        }
     }
 }

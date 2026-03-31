@@ -47,6 +47,14 @@ public sealed class ZoneSupervisor
         }
     }
 
+    public void ReportExternalMobStates(int zoneId, MobSnapshot[] mobs)
+    {
+        if (_zones.TryGetValue(zoneId, out var zone))
+        {
+            zone.ReportMobStates(mobs);
+        }
+    }
+
     public ZoneRuntimeSnapshot[] CreateDashboardSnapshot()
         => _zones.Values
             .OrderBy(zone => zone.Definition.ZoneId)
@@ -210,7 +218,8 @@ public sealed class ZoneSupervisor
                     _settings.GhostMargin,
                     _settings.PrewarmMargin,
                     _settings.TransferInset,
-                    Array.Empty<ZonePlayerSnapshot>());
+                    Array.Empty<ZonePlayerSnapshot>(),
+                    Array.Empty<ZoneMobSnapshot>());
             }
 
             return _host.CreateDashboardSnapshot(LifecycleState, LastStateChangeUtc, IdleSinceUtc);
@@ -237,5 +246,14 @@ public sealed class ZoneSupervisor
 
         public void RemovePlayer(Guid sessionId)
             => _host?.RemovePlayer(sessionId);
+
+        public void ReportMobStates(MobSnapshot[] mobs)
+        {
+            _host?.ReportMobStates(mobs);
+            if (_host is not null)
+            {
+                IdleSinceUtc = null;
+            }
+        }
     }
 }

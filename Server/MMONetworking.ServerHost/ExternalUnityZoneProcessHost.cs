@@ -3,6 +3,7 @@ using System.Collections.Concurrent;
 using System.Diagnostics;
 using System.IO;
 using System.Linq;
+using System.Net.NetworkInformation;
 using System.Net.Sockets;
 using System.Threading;
 using System.Threading.Tasks;
@@ -16,6 +17,7 @@ public sealed class ExternalUnityZoneProcessHost : IZoneRuntimeHost
     private readonly ZoneRuntimeSettings _settings;
     private readonly TaskCompletionSource<bool> _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly ConcurrentDictionary<Guid, ExternalPlayerState> _players = new();
+    private volatile MobSnapshot[] _mobs = Array.Empty<MobSnapshot>();
     private Process? _process;
 
     public ExternalUnityZoneProcessHost(ZoneDefinition definition, ZoneRuntimeSettings settings)
@@ -35,6 +37,8 @@ public sealed class ExternalUnityZoneProcessHost : IZoneRuntimeHost
         {
             throw new FileNotFoundException("Unity zone server executable was not found.", executablePath);
         }
+
+        EnsurePortsAvailable();
 
         var startInfo = new ProcessStartInfo
         {
@@ -59,7 +63,8 @@ public sealed class ExternalUnityZoneProcessHost : IZoneRuntimeHost
                 $"-mmo-max-x {_definition.MaxX}",
                 $"-mmo-min-z {_definition.MinZ}",
                 $"-mmo-max-z {_definition.MaxZ}",
-                $"-mmo-prewarm-margin {_settings.PrewarmMargin}"
+                $"-mmo-prewarm-margin {_settings.PrewarmMargin}",
+                $"-mmo-mob-count {_settings.GetMobCountForZone(_definition.ZoneId)}"
             })
         };
 
@@ -141,11 +146,29 @@ public sealed class ExternalUnityZoneProcessHost : IZoneRuntimeHost
                     player.Velocity.Y,
                     player.Velocity.Z,
                     null))
+                .ToArray(),
+            _mobs
+                .OrderBy(mob => mob.MobId, StringComparer.Ordinal)
+                .Select(mob => new ZoneMobSnapshot(
+                    mob.MobId,
+                    mob.MobTypeId,
+                    mob.Position.X,
+                    mob.Position.Y,
+                    mob.Position.Z,
+                    mob.Velocity.X,
+                    mob.Velocity.Y,
+                    mob.Velocity.Z,
+                    mob.State))
                 .ToArray());
 
     public void ReportPlayerState(Guid sessionId, ulong playerId, NetworkVector3 position, NetworkVector3 velocity)
     {
         _players[sessionId] = new ExternalPlayerState(sessionId, playerId, position, velocity);
+    }
+
+    public void ReportMobStates(MobSnapshot[] mobs)
+    {
+        _mobs = mobs ?? Array.Empty<MobSnapshot>();
     }
 
     public void RemovePlayer(Guid sessionId)
@@ -206,6 +229,30 @@ public sealed class ExternalUnityZoneProcessHost : IZoneRuntimeHost
         catch (OperationCanceledException)
         {
         }
+    }
+
+    private void EnsurePortsAvailable()
+    {
+        var ip = IPGlobalProperties.GetIPGlobalProperties();
+        var tcpConflict = ip.GetActiveTcpListeners().Any(endpoint => endpoint.Port == _definition.TcpPort);
+        var udpConflict = ip.GetActiveUdpListeners().Any(endpoint => endpoint.Port == _definition.UdpPort);
+
+        if (!tcpConflict && !udpConflict)
+        {
+            return;
+        }
+
+        var conflicts = string.Join(
+            ", ",
+            new[]
+            {
+                tcpConflict ? $"TCP {_definition.TcpPort}" : null,
+                udpConflict ? $"UDP {_definition.UdpPort}" : null
+            }.Where(value => value != null));
+
+        throw new InvalidOperationException(
+            $"Zone {_definition.ZoneId} cannot start Unity process because {conflicts} is already in use. " +
+            "Stop the existing process using that port before launching this zone.");
     }
 
     private sealed record ExternalPlayerState(Guid SessionId, ulong PlayerId, NetworkVector3 Position, NetworkVector3 Velocity);

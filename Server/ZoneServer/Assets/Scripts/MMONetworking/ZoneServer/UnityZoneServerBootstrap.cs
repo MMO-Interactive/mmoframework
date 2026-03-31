@@ -17,6 +17,7 @@ public sealed class UnityZoneServerBootstrap : MonoBehaviour
     [SerializeField] private float minZ = 0f;
     [SerializeField] private float maxZ = 100f;
     [SerializeField] private float prewarmMargin = 20f;
+    [SerializeField] private int mobCount = 2;
     [Header("Control Plane")]
     [SerializeField] private string controlHost = "127.0.0.1";
     [SerializeField] private int controlPort = 7050;
@@ -51,7 +52,7 @@ public sealed class UnityZoneServerBootstrap : MonoBehaviour
         }
 
         var definition = new ZoneDefinition(zoneId, zoneName, host, tcpPort, udpPort, minX, maxX, minZ, maxZ);
-        _runtime = new UnityZoneServerRuntime(definition, controlHost, controlPort, prewarmMargin);
+        _runtime = new UnityZoneServerRuntime(definition, controlHost, controlPort, prewarmMargin, mobCount);
         _status = "Starting";
         _runTask = _runtime.RunAsync();
         await Task.Yield();
@@ -79,6 +80,7 @@ public sealed class UnityZoneServerBootstrap : MonoBehaviour
         minZ = ReadFloat(args, "-mmo-min-z", minZ);
         maxZ = ReadFloat(args, "-mmo-max-z", maxZ);
         prewarmMargin = ReadFloat(args, "-mmo-prewarm-margin", prewarmMargin);
+        mobCount = ReadInt(args, "-mmo-mob-count", mobCount);
         controlHost = ReadString(args, "-mmo-control-host", controlHost);
         controlPort = ReadInt(args, "-mmo-control-port", controlPort);
     }

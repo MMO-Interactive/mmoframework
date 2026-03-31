@@ -9,16 +9,18 @@ namespace MMONetworking.ServerHost;
 public sealed class SessionRegistry
 {
     private readonly ConcurrentDictionary<Guid, SessionRecord> _sessions = new();
-    private long _nextPlayerId = 1000;
 
-    public SessionRecord CreateSession(string accountId, int initialZoneId, NetworkVector3 spawnPosition)
+    public SessionRecord CreateSession(string accountId, string accountName, ulong characterId, int initialZoneId, NetworkVector3 spawnPosition)
     {
+        var nowUtc = DateTimeOffset.UtcNow;
         var session = new SessionRecord(
             Guid.NewGuid(),
-            (ulong)Interlocked.Increment(ref _nextPlayerId),
+            characterId,
             accountId,
+            accountName,
             initialZoneId,
-            spawnPosition);
+            spawnPosition,
+            nowUtc);
 
         _sessions[session.SessionId] = session;
         return session;
@@ -73,6 +75,70 @@ public sealed class SessionRegistry
         }
     }
 
+    public void TouchTcp(Guid sessionId)
+    {
+        if (_sessions.TryGetValue(sessionId, out var session))
+        {
+            session.LastTcpSeenUtc = DateTimeOffset.UtcNow;
+            session.DisconnectGraceDeadlineUtc = null;
+        }
+    }
+
+    public void TouchUdp(Guid sessionId)
+    {
+        if (_sessions.TryGetValue(sessionId, out var session))
+        {
+            session.LastUdpSeenUtc = DateTimeOffset.UtcNow;
+            session.DisconnectGraceDeadlineUtc = null;
+        }
+    }
+
+    public bool IsTimedOut(Guid sessionId, TimeSpan timeout)
+    {
+        if (!_sessions.TryGetValue(sessionId, out var session))
+        {
+            return false;
+        }
+
+        var nowUtc = DateTimeOffset.UtcNow;
+        var lastSeenUtc = session.LastTcpSeenUtc > session.LastUdpSeenUtc
+            ? session.LastTcpSeenUtc
+            : session.LastUdpSeenUtc;
+
+        return nowUtc - lastSeenUtc > timeout;
+    }
+
+    public bool BeginDisconnectGrace(Guid sessionId, TimeSpan gracePeriod, out DateTimeOffset deadlineUtc)
+    {
+        deadlineUtc = default;
+        if (!_sessions.TryGetValue(sessionId, out var session))
+        {
+            return false;
+        }
+
+        if (session.DisconnectGraceDeadlineUtc.HasValue)
+        {
+            deadlineUtc = session.DisconnectGraceDeadlineUtc.Value;
+            return false;
+        }
+
+        deadlineUtc = DateTimeOffset.UtcNow.Add(gracePeriod);
+        session.DisconnectGraceDeadlineUtc = deadlineUtc;
+        return true;
+    }
+
+    public bool IsGraceExpired(Guid sessionId, out DateTimeOffset? deadlineUtc)
+    {
+        deadlineUtc = null;
+        if (!_sessions.TryGetValue(sessionId, out var session))
+        {
+            return false;
+        }
+
+        deadlineUtc = session.DisconnectGraceDeadlineUtc;
+        return deadlineUtc.HasValue && DateTimeOffset.UtcNow >= deadlineUtc.Value;
+    }
+
     public SessionSnapshot[] CreateDashboardSnapshot()
         => _sessions.Values
             .OrderBy(session => session.PlayerId)
@@ -80,10 +146,14 @@ public sealed class SessionRegistry
                 session.SessionId,
                 session.PlayerId,
                 session.AccountId,
+                session.AccountName,
                 session.CurrentZoneId,
                 session.LastKnownPosition.X,
                 session.LastKnownPosition.Y,
                 session.LastKnownPosition.Z,
+                session.LastTcpSeenUtc,
+                session.LastUdpSeenUtc,
+                session.DisconnectGraceDeadlineUtc,
                 session.PendingAttachments.Values
                     .OrderBy(attachment => attachment.ZoneId)
                     .Select(attachment => new PendingAttachmentSnapshot(
@@ -99,18 +169,27 @@ public sealed class SessionRegistry
 
     public sealed class SessionRecord
     {
-        public SessionRecord(Guid sessionId, ulong playerId, string accountId, int currentZoneId, NetworkVector3 spawnPosition)
+        public SessionRecord(Guid sessionId, ulong playerId, string accountId, string accountName, int currentZoneId, NetworkVector3 spawnPosition, DateTimeOffset createdAtUtc)
         {
             SessionId = sessionId;
             PlayerId = playerId;
             AccountId = accountId;
+            AccountName = accountName;
             CurrentZoneId = currentZoneId;
             LastKnownPosition = spawnPosition;
+            CreatedAtUtc = createdAtUtc;
+            LastTcpSeenUtc = createdAtUtc;
+            LastUdpSeenUtc = createdAtUtc;
         }
 
         public Guid SessionId { get; }
         public ulong PlayerId { get; }
         public string AccountId { get; }
+        public string AccountName { get; }
+        public DateTimeOffset CreatedAtUtc { get; }
+        public DateTimeOffset LastTcpSeenUtc { get; set; }
+        public DateTimeOffset LastUdpSeenUtc { get; set; }
+        public DateTimeOffset? DisconnectGraceDeadlineUtc { get; set; }
         public int CurrentZoneId { get; set; }
         public NetworkVector3 LastKnownPosition { get; set; }
         public ConcurrentDictionary<int, PendingAttachment> PendingAttachments { get; } = new();

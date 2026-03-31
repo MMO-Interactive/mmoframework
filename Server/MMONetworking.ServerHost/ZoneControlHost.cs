@@ -60,6 +60,19 @@ public sealed class ZoneControlHost
                         }
                         await WireProtocol.WriteTcpMessageAsync(stream, new HeartbeatMessage(Environment.TickCount64), cancellationToken).ConfigureAwait(false);
                         return;
+                    case ZoneStateBatchUpdateMessage stateBatch:
+                        for (var i = 0; i < stateBatch.Players.Length; i++)
+                        {
+                            var player = stateBatch.Players[i];
+                            _sessionRegistry.SetCurrentZone(player.SessionId, stateBatch.ZoneId, player.Position);
+                            _zoneSupervisor.ReportExternalPlayerState(stateBatch.ZoneId, player.SessionId, player.PlayerId, player.Position, player.Velocity);
+                        }
+                        await WireProtocol.WriteTcpMessageAsync(stream, new HeartbeatMessage(Environment.TickCount64), cancellationToken).ConfigureAwait(false);
+                        return;
+                    case ZoneMobStateUpdateMessage mobStateUpdate:
+                        _zoneSupervisor.ReportExternalMobStates(mobStateUpdate.ZoneId, mobStateUpdate.Mobs);
+                        await WireProtocol.WriteTcpMessageAsync(stream, new HeartbeatMessage(Environment.TickCount64), cancellationToken).ConfigureAwait(false);
+                        return;
                     case ZoneTransferRequestMessage transferRequest:
                         await HandleTransferRequestAsync(stream, transferRequest, cancellationToken).ConfigureAwait(false);
                         return;
@@ -178,6 +191,15 @@ public sealed class ZoneControlHost
 
     private async Task HandlePrewarmRequestAsync(Stream stream, ZonePrewarmRequestMessage request, CancellationToken cancellationToken)
     {
+        if (!_zoneDirectory.HasZone(request.ZoneId))
+        {
+            await WireProtocol.WriteTcpMessageAsync(
+                stream,
+                new ZonePrewarmResponseMessage(false, request.SessionId, request.ZoneId, request.ZoneId, "Unknown source zone."),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         var destination = _zoneDirectory.GetPrewarmDestination(request.ZoneId, request.Position, _settings.PrewarmMargin);
         if (destination is null)
         {
@@ -189,6 +211,15 @@ public sealed class ZoneControlHost
         }
 
         var resolvedDestination = destination.Value;
+        if (!_zoneDirectory.HasZone(resolvedDestination.ZoneId))
+        {
+            await WireProtocol.WriteTcpMessageAsync(
+                stream,
+                new ZonePrewarmResponseMessage(false, request.SessionId, request.ZoneId, request.ZoneId, "Unknown destination zone."),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         await _zoneSupervisor.EnsureRunningAsync(resolvedDestination.ZoneId, cancellationToken).ConfigureAwait(false);
         Console.WriteLine($"Zone control prewarmed zone {resolvedDestination.ZoneId} for session {request.SessionId} near zone {request.ZoneId} seam.");
         await WireProtocol.WriteTcpMessageAsync(
