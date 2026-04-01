@@ -13,6 +13,10 @@ namespace MMONetworking.ServerHost;
 
 public sealed class ZoneHost : IDisposable
 {
+    private const float MaxInputDeltaSeconds = 0.1f;
+    private const float MaxMoveMagnitude = 1f;
+    private const float MinMoveMagnitude = 0.05f;
+    private const float PlayerMoveSpeed = 6f;
     private readonly ZoneDefinition _definition;
     private readonly ZoneDirectory _zoneDirectory;
     private readonly SessionRegistry _sessionRegistry;
@@ -255,9 +259,11 @@ public sealed class ZoneHost : IDisposable
 
                         player.LastAcceptedInputSequence = input.Sequence;
                         player.RemoteEndpoint = result.RemoteEndPoint;
-                        player.Velocity = input.Move * 6f;
-                        player.Position += player.Velocity * Math.Clamp(input.DeltaTimeSeconds, 0f, 0.1f);
+                        var normalizedMove = NormalizeMoveInput(input.Move);
+                        player.Velocity = normalizedMove * PlayerMoveSpeed;
+                        player.Position += player.Velocity * Math.Clamp(input.DeltaTimeSeconds, 0f, MaxInputDeltaSeconds);
                         player.Position = new NetworkVector3(player.Position.X, 0f, player.Position.Z);
+                        player.Position = _definition.Clamp(player.Position);
                         _sessionRegistry.SetCurrentZone(player.SessionId, _definition.ZoneId, player.Position);
                         _sessionRegistry.TouchUdp(player.SessionId);
                         if (input.Sequence % 20 == 0)
@@ -563,6 +569,29 @@ public sealed class ZoneHost : IDisposable
         var dx = origin.X - target.X;
         var dz = origin.Z - target.Z;
         return (dx * dx) + (dz * dz) <= _aoiRadiusSquared;
+    }
+
+    private static NetworkVector3 NormalizeMoveInput(NetworkVector3 move)
+    {
+        var planarMagnitudeSq = (move.X * move.X) + (move.Z * move.Z);
+        if (planarMagnitudeSq < MinMoveMagnitude * MinMoveMagnitude)
+        {
+            return NetworkVector3.Zero;
+        }
+
+        if (planarMagnitudeSq <= MaxMoveMagnitude * MaxMoveMagnitude)
+        {
+            return new NetworkVector3(move.X, 0f, move.Z);
+        }
+
+        var planarMagnitude = MathF.Sqrt(planarMagnitudeSq);
+        if (planarMagnitude <= 0.0001f)
+        {
+            return NetworkVector3.Zero;
+        }
+
+        var scale = MaxMoveMagnitude / planarMagnitude;
+        return new NetworkVector3(move.X * scale, 0f, move.Z * scale);
     }
 
     private void UpdateMobs(float deltaSeconds)
