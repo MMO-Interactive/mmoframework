@@ -17,6 +17,7 @@ public sealed class UnityZoneServerRuntime : IDisposable
     private const float AoiRadius = 36f;
     private const float AoiRadiusSquared = AoiRadius * AoiRadius;
     private const float MaxInputDeltaSeconds = 0.1f;
+    private const uint MaxInputSequenceAdvance = 600;
     private const float MaxMoveMagnitude = 1f;
     private const float MinMoveMagnitude = 0.05f;
     private const float PlayerMoveSpeed = 6f;
@@ -206,8 +207,38 @@ public sealed class UnityZoneServerRuntime : IDisposable
                 ZonePlayer player;
                 if (_players.TryGetValue(input.SessionId, out player))
                 {
+                    if (!IsFiniteInput(input))
+                    {
+                        if (input.Sequence % 20 == 0)
+                        {
+                            Debug.LogWarning($"Unity zone {_definition.ZoneId} rejected non-finite input seq {input.Sequence} for session {input.SessionId}.");
+                        }
+
+                        continue;
+                    }
+
                     if (input.Sequence <= player.LastAcceptedInputSequence)
                     {
+                        continue;
+                    }
+
+                    if (input.Sequence - player.LastAcceptedInputSequence > MaxInputSequenceAdvance)
+                    {
+                        if (input.Sequence % 20 == 0)
+                        {
+                            Debug.LogWarning($"Unity zone {_definition.ZoneId} rejected sequence-jump input seq {input.Sequence} for session {input.SessionId}; last accepted {player.LastAcceptedInputSequence}.");
+                        }
+
+                        continue;
+                    }
+
+                    if (player.RemoteEndpoint != null && !result.RemoteEndPoint.Equals(player.RemoteEndpoint))
+                    {
+                        if (input.Sequence % 20 == 0)
+                        {
+                            Debug.LogWarning($"Unity zone {_definition.ZoneId} rejected endpoint-mismatch input seq {input.Sequence} for session {input.SessionId}; expected {player.RemoteEndpoint}, got {result.RemoteEndPoint}.");
+                        }
+
                         continue;
                     }
 
@@ -1148,6 +1179,12 @@ public sealed class UnityZoneServerRuntime : IDisposable
         var scale = MaxMoveMagnitude / planarMagnitude;
         return new NetworkVector3(move.X * scale, 0f, move.Z * scale);
     }
+
+    private static bool IsFiniteInput(ClientInputMessage input)
+        => float.IsFinite(input.DeltaTimeSeconds)
+            && float.IsFinite(input.Move.X)
+            && float.IsFinite(input.Move.Y)
+            && float.IsFinite(input.Move.Z);
 
     private static string BuildInventorySummary(ZonePlayer player)
     {

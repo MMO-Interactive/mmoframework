@@ -14,6 +14,7 @@ namespace MMONetworking.ServerHost;
 public sealed class ZoneHost : IDisposable
 {
     private const float MaxInputDeltaSeconds = 0.1f;
+    private const uint MaxInputSequenceAdvance = 600;
     private const float MaxMoveMagnitude = 1f;
     private const float MinMoveMagnitude = 0.05f;
     private const float PlayerMoveSpeed = 6f;
@@ -248,12 +249,42 @@ public sealed class ZoneHost : IDisposable
                     case ClientInputMessage input:
                     if (_players.TryGetValue(input.SessionId, out var player))
                     {
+                        if (!IsFiniteInput(input))
+                        {
+                            if (input.Sequence % 20 == 0)
+                            {
+                                Console.WriteLine($"Zone {_definition.ZoneId} rejected non-finite input seq {input.Sequence} for session {input.SessionId}.");
+                            }
+
+                            break;
+                        }
+
+                        if (player.RemoteEndpoint is not null && !result.RemoteEndPoint.Equals(player.RemoteEndpoint))
+                        {
+                            if (input.Sequence % 20 == 0)
+                            {
+                                Console.WriteLine($"Zone {_definition.ZoneId} rejected endpoint-mismatch input seq {input.Sequence} for session {input.SessionId}; expected {player.RemoteEndpoint}, got {result.RemoteEndPoint}.");
+                            }
+
+                            break;
+                        }
+
                         if (input.Sequence <= player.LastAcceptedInputSequence)
                         {
                             if (input.Sequence % 20 == 0)
                             {
                                 Console.WriteLine($"Zone {_definition.ZoneId} rejected out-of-order input seq {input.Sequence} for session {input.SessionId}; last accepted {player.LastAcceptedInputSequence}.");
                             }
+                            break;
+                        }
+
+                        if (input.Sequence - player.LastAcceptedInputSequence > MaxInputSequenceAdvance)
+                        {
+                            if (input.Sequence % 20 == 0)
+                            {
+                                Console.WriteLine($"Zone {_definition.ZoneId} rejected sequence-jump input seq {input.Sequence} for session {input.SessionId}; last accepted {player.LastAcceptedInputSequence}.");
+                            }
+
                             break;
                         }
 
@@ -593,6 +624,12 @@ public sealed class ZoneHost : IDisposable
         var scale = MaxMoveMagnitude / planarMagnitude;
         return new NetworkVector3(move.X * scale, 0f, move.Z * scale);
     }
+
+    private static bool IsFiniteInput(ClientInputMessage input)
+        => float.IsFinite(input.DeltaTimeSeconds)
+            && float.IsFinite(input.Move.X)
+            && float.IsFinite(input.Move.Y)
+            && float.IsFinite(input.Move.Z);
 
     private void UpdateMobs(float deltaSeconds)
     {

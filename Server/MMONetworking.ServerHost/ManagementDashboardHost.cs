@@ -834,6 +834,17 @@ public sealed class ManagementDashboardHost
             var parsed = JsonSerializer.Deserialize<JsonElement>(responseText);
             return Results.Json(parsed);
         });
+        app.MapGet("/api/analytics/overview", () =>
+        {
+            try
+            {
+                return Results.Json(BuildAnalyticsSnapshot());
+            }
+            catch (Exception ex)
+            {
+                return Results.BadRequest(new { error = ex.Message });
+            }
+        });
         app.MapGet("/", async context =>
         {
             context.Response.ContentType = "text/html; charset=utf-8";
@@ -918,6 +929,11 @@ public sealed class ManagementDashboardHost
         {
             context.Response.ContentType = "text/html; charset=utf-8";
             await context.Response.WriteAsync(BuildAssetUploadPage(), cancellationToken);
+        });
+        app.MapGet("/tools/analytics", async context =>
+        {
+            context.Response.ContentType = "text/html; charset=utf-8";
+            await context.Response.WriteAsync(BuildAnalyticsPage(), cancellationToken);
         });
         app.MapGet("/map", async context =>
         {
@@ -1340,6 +1356,7 @@ public sealed class ManagementDashboardHost
             <a class="ops-tile btn" href="/tools/world-events"><strong>World Events</strong><span class="muted">Advance event state, inspect contributions, and manage rewards.</span></a>
             <a class="ops-tile btn" href="/tools/invasions"><strong>Invasions</strong><span class="muted">Control invasion waves and kill-credit payouts.</span></a>
             <a class="ops-tile btn" href="/tools/assets"><strong>Assets</strong><span class="muted">Upload Unity bundles through the dedicated Asset Server API.</span></a>
+            <a class="ops-tile btn" href="/tools/analytics"><strong>Analytics</strong><span class="muted">Review cross-system KPIs and trend snapshots.</span></a>
           </div>
         </article>
 
@@ -1713,6 +1730,7 @@ public sealed class ManagementDashboardHost
       <div class="badge"><a href="/tools/world-events" style="color:inherit;text-decoration:none;">World Events</a></div>
       <div class="badge"><a href="/tools/invasions" style="color:inherit;text-decoration:none;">Invasions</a></div>
       <div class="badge"><a href="/tools/assets" style="color:inherit;text-decoration:none;">Asset Uploads</a></div>
+      <div class="badge"><a href="/tools/analytics" style="color:inherit;text-decoration:none;">Analytics</a></div>
       <h1>Live zone and session control surface.</h1>
       <div class="sub">
         This view reflects the in-process MMO runtime. It is intended for basic operations now: gateway health, online sessions, zone populations, and transfer activity.
@@ -1799,6 +1817,7 @@ public sealed class ManagementDashboardHost
           <li><a href="/tools/world-events">World Events</a></li>
           <li><a href="/tools/invasions">Invasions</a></li>
           <li><a href="/tools/assets">Asset Uploads</a></li>
+          <li><a href="/tools/analytics">Analytics</a></li>
         </ul>
       </article>
     </section>
@@ -1952,6 +1971,7 @@ public sealed class ManagementDashboardHost
       <a class="tool" href="/tools/world-events"><strong>World Events</strong><span class="muted">Schedule event lifecycles, contributions, and reward claims.</span></a>
       <a class="tool" href="/tools/invasions"><strong>Invasions</strong><span class="muted">Run NPC mob invasion waves and player kill-credit rewards.</span></a>
       <a class="tool" href="/tools/assets"><strong>Asset Uploads</strong><span class="muted">Upload Unity asset bundles via the dedicated Asset API.</span></a>
+      <a class="tool" href="/tools/analytics"><strong>Analytics</strong><span class="muted">Cross-system KPIs, health metrics, and operational trends.</span></a>
       <a class="tool" href="/map"><strong>Operations Map</strong><span class="muted">Visualize sessions, movement, and transfers.</span></a>
     </section>
   </div>
@@ -4238,6 +4258,327 @@ public sealed class ManagementDashboardHost
 
         return html;
     }
+
+    private DashboardAnalyticsSnapshot BuildAnalyticsSnapshot()
+    {
+        var nowUtc = DateTimeOffset.UtcNow;
+        var dashboard = CreateSnapshot();
+        var accounts = _accountStore.GetAccounts();
+        var definitions = _gameplayDefinitions.GetSnapshot();
+        var moderation = _moderationStore.GetSnapshot(500);
+        var combat = _combatStore.GetSnapshot(1000);
+        var recipes = _craftingStore.GetRecipes();
+
+        var sessions = dashboard.Sessions;
+        var zones = dashboard.Zones;
+        var onlineAccountIds = sessions.Select(session => session.AccountId).Where(id => !string.IsNullOrWhiteSpace(id)).Distinct(StringComparer.OrdinalIgnoreCase).ToArray();
+        var onlinePlayers = zones.Sum(zone => zone.ActivePlayers);
+        var averagePlayersPerZone = zones.Length == 0 ? 0 : Math.Round((double)onlinePlayers / zones.Length, 2);
+        var zoneBreakdown = zones
+            .Select(zone => new ZonePopulationAnalytics(zone.ZoneId, zone.Name, zone.ActivePlayers, zone.ActiveGhosts, zone.Mobs.Length, zone.RuntimeMode, zone.LifecycleState))
+            .OrderByDescending(zone => zone.ActivePlayers)
+            .ThenBy(zone => zone.ZoneId)
+            .ToArray();
+        var hotZones = zoneBreakdown.Where(zone => zone.ActivePlayers > 0).Take(5).ToArray();
+        var sessionsWithPendingTransfers = sessions.Count(session => session.PendingAttachments.Length > 0);
+        var activeGraceSessions = sessions.Count(session => session.DisconnectGraceDeadlineUtc.HasValue && session.DisconnectGraceDeadlineUtc.Value > nowUtc);
+        var recentUdpSessions = sessions.Count(session => (nowUtc - session.LastUdpSeenUtc) <= TimeSpan.FromSeconds(15));
+        var recentTcpSessions = sessions.Count(session => (nowUtc - session.LastTcpSeenUtc) <= TimeSpan.FromSeconds(15));
+
+        var accountsCreated24h = accounts.Count(account => TryParseDate(account.CreatedAtUtc, out var createdAtUtc) && createdAtUtc >= nowUtc.AddHours(-24));
+        var accountsLoggedIn24h = accounts.Count(account => TryParseDate(account.LastLoginAtUtc, out var lastLoginAtUtc) && lastLoginAtUtc >= nowUtc.AddHours(-24));
+
+        var mutedAccounts = moderation.Accounts.Count(account => account.IsMuted);
+        var bannedAccounts = moderation.Accounts.Count(account => account.IsBanned);
+        var moderationActions24h = moderation.RecentActions.Count(action => action.CreatedAtUtc >= nowUtc.AddHours(-24));
+        var moderationByType = moderation.RecentActions
+            .GroupBy(action => action.ActionType ?? "unknown", StringComparer.OrdinalIgnoreCase)
+            .Select(group => new BreakdownCount(group.Key, group.Count()))
+            .OrderByDescending(item => item.Count)
+            .ThenBy(item => item.Label, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        var totalDeaths = combat.Combatants.Sum(combatant => combatant.Deaths);
+        var totalHitPoints = combat.Combatants.Sum(combatant => combatant.HitPoints);
+        var totalMaxHitPoints = combat.Combatants.Sum(combatant => combatant.MaxHitPoints);
+        var totalStamina = combat.Combatants.Sum(combatant => combatant.Stamina);
+        var combatActions24h = combat.RecentActions.Count(action => action.CreatedAtUtc >= nowUtc.AddHours(-24));
+        var damage24h = combat.RecentActions
+            .Where(action => action.CreatedAtUtc >= nowUtc.AddHours(-24))
+            .Sum(action => Math.Max(action.Damage, 0));
+        var combatByType = combat.RecentActions
+            .GroupBy(action => action.ActionType ?? "unknown", StringComparer.OrdinalIgnoreCase)
+            .Select(group => new BreakdownCount(group.Key, group.Count()))
+            .OrderByDescending(item => item.Count)
+            .ThenBy(item => item.Label, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+        return new DashboardAnalyticsSnapshot(
+            nowUtc,
+            new GatewayAnalytics(
+                dashboard.Gateway.ConnectionAttempts,
+                dashboard.Gateway.SuccessfulLogins,
+                dashboard.Gateway.Errors,
+                dashboard.Gateway.ConnectionAttempts == 0 ? 0 : Math.Round((double)dashboard.Gateway.SuccessfulLogins / dashboard.Gateway.ConnectionAttempts, 4)),
+            new AccountAnalytics(
+                accounts.Length,
+                onlineAccountIds.Length,
+                accountsCreated24h,
+                accountsLoggedIn24h),
+            new SessionAnalytics(
+                sessions.Length,
+                onlinePlayers,
+                sessionsWithPendingTransfers,
+                activeGraceSessions,
+                recentTcpSessions,
+                recentUdpSessions,
+                averagePlayersPerZone),
+            new GameplayContentAnalytics(
+                definitions.Items.Length,
+                definitions.Skills.Length,
+                definitions.Resources.Length,
+                definitions.Nodes.Length,
+                definitions.Zones.Length,
+                recipes.Length),
+            new ModerationAnalytics(
+                mutedAccounts,
+                bannedAccounts,
+                moderation.RecentActions.Length,
+                moderationActions24h,
+                moderationByType),
+            new CombatAnalytics(
+                combat.Combatants.Length,
+                totalDeaths,
+                totalHitPoints,
+                totalMaxHitPoints,
+                totalStamina,
+                combat.RecentActions.Length,
+                combatActions24h,
+                damage24h,
+                combatByType),
+            zoneBreakdown,
+            hotZones);
+    }
+
+    private string BuildAnalyticsPage()
+    {
+        var html = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Operational Analytics</title>
+  <style>
+    body { margin: 0; font-family: Inter, "Segoe UI", system-ui, sans-serif; background: #0a1520; color: #e9f2fb; }
+    .wrap { width: min(1200px, calc(100vw - 32px)); margin: 0 auto; padding: 24px 0 42px; display: grid; gap: 14px; }
+    .card { background: rgba(16,30,43,0.88); border: 1px solid rgba(144,201,255,0.14); border-radius: 18px; padding: 16px; box-shadow: 0 20px 70px rgba(0,0,0,0.28); }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .btn { display: inline-flex; align-items: center; border-radius: 999px; border: 1px solid rgba(144,201,255,0.20); background: rgba(255,255,255,0.03); color: #e9f2fb; padding: 8px 13px; text-decoration: none; cursor: pointer; }
+    .btn.primary { background: linear-gradient(135deg, rgba(68,194,255,0.28), rgba(112,147,255,0.24)); }
+    .muted { color: #9ab1c8; }
+    .grid { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); margin-top: 10px; }
+    .metric { border: 1px solid rgba(144,201,255,0.14); border-radius: 12px; padding: 10px; background: rgba(255,255,255,0.02); }
+    .metric .label { font-size: 0.75rem; text-transform: uppercase; letter-spacing: 0.08em; color: #9ab1c8; }
+    .metric .value { font-size: 1.25rem; font-weight: 700; margin-top: 6px; }
+    table { width: 100%; border-collapse: collapse; font-size: 0.92rem; }
+    th, td { padding: 7px 6px; border-bottom: 1px solid rgba(144,201,255,0.12); text-align: left; }
+    pre { white-space: pre-wrap; word-break: break-word; border-radius: 12px; border: 1px solid rgba(144,201,255,0.13); padding: 12px; background: rgba(0,0,0,0.22); min-height: 120px; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="card">
+      <h1 style="margin:0 0 8px;">Operational Analytics</h1>
+      <p class="muted">Live derived KPIs for accounts, sessions, moderation, combat, and content footprint. Refreshes automatically every 10 seconds.</p>
+      <div class="row">
+        <a class="btn" href="/">Dashboard</a>
+        <a class="btn" href="/tools">Tools Home</a>
+        <button id="refreshBtn" class="btn primary" type="button">Refresh now</button>
+        <span class="muted">Last refresh: <span id="lastRefresh">never</span></span>
+      </div>
+    </section>
+
+    <section class="card">
+      <h2 style="margin-top:0;">Core KPIs</h2>
+      <div id="kpiGrid" class="grid"></div>
+    </section>
+
+    <section class="card">
+      <h2 style="margin-top:0;">Zone Population</h2>
+      <table>
+        <thead><tr><th>Zone</th><th>Players</th><th>Ghosts</th><th>Mobs</th><th>Runtime</th><th>State</th></tr></thead>
+        <tbody id="zoneTable"><tr><td colspan="6" class="muted">Loading…</td></tr></tbody>
+      </table>
+    </section>
+
+    <section class="card">
+      <h2 style="margin-top:0;">Event Breakdown</h2>
+      <div class="grid">
+        <div>
+          <h3>Moderation Actions</h3>
+          <pre id="moderationBreakdown">Loading…</pre>
+        </div>
+        <div>
+          <h3>Combat Actions</h3>
+          <pre id="combatBreakdown">Loading…</pre>
+        </div>
+      </div>
+    </section>
+  </div>
+
+  <script>
+    const kpiGrid = document.getElementById('kpiGrid');
+    const zoneTable = document.getElementById('zoneTable');
+    const moderationBreakdown = document.getElementById('moderationBreakdown');
+    const combatBreakdown = document.getElementById('combatBreakdown');
+    const lastRefresh = document.getElementById('lastRefresh');
+
+    function metric(label, value) {
+      return `<div class="metric"><div class="label">${label}</div><div class="value">${value}</div></div>`;
+    }
+
+    function formatBreakdown(rows) {
+      if (!Array.isArray(rows) || rows.length === 0) return 'No data.';
+      return rows.map(row => `${row.label}: ${row.count}`).join('\n');
+    }
+
+    function render(data) {
+      const successRatePct = (Number(data.gateway.loginSuccessRate) * 100).toFixed(2) + '%';
+      kpiGrid.innerHTML = [
+        metric('Accounts', data.accounts.totalAccounts),
+        metric('Accounts Online', data.accounts.onlineAccounts),
+        metric('Sessions', data.sessions.activeSessions),
+        metric('Players Online', data.sessions.onlinePlayers),
+        metric('Avg Players / Zone', data.sessions.averagePlayersPerZone),
+        metric('Gateway Success', successRatePct),
+        metric('Muted Accounts', data.moderation.mutedAccounts),
+        metric('Banned Accounts', data.moderation.bannedAccounts),
+        metric('Combatants', data.combat.combatants),
+        metric('Combat Actions (24h)', data.combat.actions24h),
+        metric('Damage (24h)', data.combat.damage24h),
+        metric('Craft Recipes', data.content.craftingRecipes)
+      ].join('');
+
+      const zones = Array.isArray(data.zonePopulation) ? data.zonePopulation : [];
+      zoneTable.innerHTML = zones.length === 0
+        ? '<tr><td colspan="6" class="muted">No zone data.</td></tr>'
+        : zones.map(z => `<tr><td>${z.zoneId} ${z.name}</td><td>${z.activePlayers}</td><td>${z.activeGhosts}</td><td>${z.activeMobs}</td><td>${z.runtimeMode}</td><td>${z.lifecycleState}</td></tr>`).join('');
+
+      moderationBreakdown.textContent = formatBreakdown(data.moderation.byActionType);
+      combatBreakdown.textContent = formatBreakdown(data.combat.byActionType);
+      lastRefresh.textContent = new Date(data.generatedAtUtc).toLocaleString();
+    }
+
+    async function refresh() {
+      const response = await fetch('/api/analytics/overview', { cache: 'no-store' });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data && data.error ? data.error : `HTTP ${response.status}`);
+      }
+
+      render(data);
+    }
+
+    async function load() {
+      try {
+        await refresh();
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error);
+        kpiGrid.innerHTML = `<div class="metric"><div class="label">Error</div><div class="value">${message}</div></div>`;
+      }
+    }
+
+    document.getElementById('refreshBtn').addEventListener('click', load);
+    load();
+    setInterval(load, 10000);
+  </script>
+</body>
+</html>
+""";
+
+        return html;
+    }
+
+    private static bool TryParseDate(string? value, out DateTimeOffset parsed)
+    {
+        if (string.IsNullOrWhiteSpace(value))
+        {
+            parsed = default;
+            return false;
+        }
+
+        return DateTimeOffset.TryParse(value, out parsed);
+    }
+
+    private sealed record DashboardAnalyticsSnapshot(
+        DateTimeOffset GeneratedAtUtc,
+        GatewayAnalytics Gateway,
+        AccountAnalytics Accounts,
+        SessionAnalytics Sessions,
+        GameplayContentAnalytics Content,
+        ModerationAnalytics Moderation,
+        CombatAnalytics Combat,
+        ZonePopulationAnalytics[] ZonePopulation,
+        ZonePopulationAnalytics[] HotZones);
+
+    private sealed record GatewayAnalytics(
+        long ConnectionAttempts,
+        long SuccessfulLogins,
+        long Errors,
+        double LoginSuccessRate);
+
+    private sealed record AccountAnalytics(
+        int TotalAccounts,
+        int OnlineAccounts,
+        int Created24h,
+        int LoggedIn24h);
+
+    private sealed record SessionAnalytics(
+        int ActiveSessions,
+        int OnlinePlayers,
+        int SessionsWithPendingTransfers,
+        int SessionsInGrace,
+        int SessionsWithRecentTcp,
+        int SessionsWithRecentUdp,
+        double AveragePlayersPerZone);
+
+    private sealed record GameplayContentAnalytics(
+        int Items,
+        int Skills,
+        int Resources,
+        int Nodes,
+        int Zones,
+        int CraftingRecipes);
+
+    private sealed record ModerationAnalytics(
+        int MutedAccounts,
+        int BannedAccounts,
+        int RecentActions,
+        int Actions24h,
+        BreakdownCount[] ByActionType);
+
+    private sealed record CombatAnalytics(
+        int Combatants,
+        int TotalDeaths,
+        int TotalHitPoints,
+        int TotalMaxHitPoints,
+        int TotalStamina,
+        int RecentActions,
+        int Actions24h,
+        int Damage24h,
+        BreakdownCount[] ByActionType);
+
+    private sealed record ZonePopulationAnalytics(
+        int ZoneId,
+        string Name,
+        int ActivePlayers,
+        int ActiveGhosts,
+        int ActiveMobs,
+        string RuntimeMode,
+        string LifecycleState);
+
+    private sealed record BreakdownCount(string Label, int Count);
 
     private string BuildMapHtml()
     {
