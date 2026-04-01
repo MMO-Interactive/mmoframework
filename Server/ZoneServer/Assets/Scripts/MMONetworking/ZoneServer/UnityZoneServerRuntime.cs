@@ -16,6 +16,12 @@ public sealed class UnityZoneServerRuntime : IDisposable
     private static readonly TimeSpan SessionTimeout = TimeSpan.FromSeconds(12);
     private const float AoiRadius = 36f;
     private const float AoiRadiusSquared = AoiRadius * AoiRadius;
+    private const float MaxInputDeltaSeconds = 0.1f;
+    private const uint MaxInputSequenceAdvance = 600;
+    private const float MaxMoveMagnitude = 1f;
+    private const float MinMoveMagnitude = 0.05f;
+    private const float PlayerMoveSpeed = 6f;
+    private const int MaxMana = 100;
     private readonly ZoneDefinition _definition;
     private readonly string _controlHost;
     private readonly int _controlPort;
@@ -26,7 +32,10 @@ public sealed class UnityZoneServerRuntime : IDisposable
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Dictionary<string, ResourceNode> _resourceNodes;
     private readonly Dictionary<string, ZoneMob> _mobs;
+    private readonly Dictionary<string, FarmPlot> _farmPlots = new Dictionary<string, FarmPlot>(StringComparer.OrdinalIgnoreCase);
     private readonly object _resourceSync = new();
+    private readonly object _mobSync = new();
+    private readonly object _farmSync = new();
     private readonly object _mobSync = new();
     private readonly System.Random _random = new System.Random();
     private int _mobReportInFlight;
@@ -116,7 +125,11 @@ public sealed class UnityZoneServerRuntime : IDisposable
                 player.Position = authorized.SpawnPosition;
                 player.PendingDestinationZoneId = null;
                 player.LastIssuedTransferId = null;
-                player.GatheringSkill = Math.Max(player.GatheringSkill, 1);
+                player.WoodcuttingSkill = Math.Max(player.WoodcuttingSkill, 1);
+                player.MiningSkill = Math.Max(player.MiningSkill, 1);
+                player.CraftingSkill = Math.Max(player.CraftingSkill, 1);
+                player.FarmingSkill = Math.Max(player.FarmingSkill, 1);
+                player.AnimalTamingSkill = Math.Max(player.AnimalTamingSkill, 1);
 
                 player.ControlStream = stream;
                 player.LastTcpSeenUtc = DateTimeOffset.UtcNow;
@@ -194,17 +207,50 @@ public sealed class UnityZoneServerRuntime : IDisposable
                 ZonePlayer player;
                 if (_players.TryGetValue(input.SessionId, out player))
                 {
+                    if (!IsFiniteInput(input))
+                    {
+                        if (input.Sequence % 20 == 0)
+                        {
+                            Debug.LogWarning($"Unity zone {_definition.ZoneId} rejected non-finite input seq {input.Sequence} for session {input.SessionId}.");
+                        }
+
+                        continue;
+                    }
+
                     if (input.Sequence <= player.LastAcceptedInputSequence)
                     {
+                        continue;
+                    }
+
+                    if (input.Sequence - player.LastAcceptedInputSequence > MaxInputSequenceAdvance)
+                    {
+                        if (input.Sequence % 20 == 0)
+                        {
+                            Debug.LogWarning($"Unity zone {_definition.ZoneId} rejected sequence-jump input seq {input.Sequence} for session {input.SessionId}; last accepted {player.LastAcceptedInputSequence}.");
+                        }
+
+                        continue;
+                    }
+
+                    if (player.RemoteEndpoint != null && !result.RemoteEndPoint.Equals(player.RemoteEndpoint))
+                    {
+                        if (input.Sequence % 20 == 0)
+                        {
+                            Debug.LogWarning($"Unity zone {_definition.ZoneId} rejected endpoint-mismatch input seq {input.Sequence} for session {input.SessionId}; expected {player.RemoteEndpoint}, got {result.RemoteEndPoint}.");
+                        }
+
                         continue;
                     }
 
                     player.LastAcceptedInputSequence = input.Sequence;
                     player.RemoteEndpoint = result.RemoteEndPoint;
                     player.LastUdpSeenUtc = DateTimeOffset.UtcNow;
-                    player.Velocity = input.Move * 6f;
-                    player.Position += player.Velocity * Mathf.Clamp(input.DeltaTimeSeconds, 0f, 0.1f);
+                    var normalizedMove = NormalizeMoveInput(input.Move);
+                    var speedMultiplier = player.GetMovementSpeedMultiplier(DateTimeOffset.UtcNow);
+                    player.Velocity = normalizedMove * (PlayerMoveSpeed * speedMultiplier);
+                    player.Position += player.Velocity * Mathf.Clamp(input.DeltaTimeSeconds, 0f, MaxInputDeltaSeconds);
                     player.Position = new NetworkVector3(player.Position.X, 0f, player.Position.Z);
+                    player.Position = _definition.Clamp(player.Position);
                 }
             }
             else if (message is TransferProbeMessage probe)
@@ -231,6 +277,8 @@ public sealed class UnityZoneServerRuntime : IDisposable
                 _tick++;
                 RegenerateResourceNodes();
                 UpdateMobs(0.05f);
+                UpdateMagicEffects(0.05f);
+                UpdateFarmPlots();
 
                 foreach (var player in _players.Values.ToArray())
                 {
@@ -362,7 +410,7 @@ public sealed class UnityZoneServerRuntime : IDisposable
         {
             await SendToPlayerAsync(
                 player,
-                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Session mismatch.", string.Empty, 0, player.GatheringSkill),
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Session mismatch.", string.Empty, 0, player.GetPrimaryGatheringSkill()),
                 cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -371,6 +419,18 @@ public sealed class UnityZoneServerRuntime : IDisposable
         {
             case GameplayCommandKind.Gather:
                 await HandleGatherAsync(player, command, cancellationToken).ConfigureAwait(false);
+                return;
+            case GameplayCommandKind.CastSpell:
+                await HandleCastSpellAsync(player, command, cancellationToken).ConfigureAwait(false);
+                return;
+            case GameplayCommandKind.Farming:
+                await HandleFarmingAsync(player, command, cancellationToken).ConfigureAwait(false);
+                return;
+            case GameplayCommandKind.Tame:
+                await HandleTameAsync(player, command, cancellationToken).ConfigureAwait(false);
+                return;
+            case GameplayCommandKind.Craft:
+                await HandleCraftAsync(player, command, cancellationToken).ConfigureAwait(false);
                 return;
             case GameplayCommandKind.InspectInventory:
                 await SendToPlayerAsync(
@@ -382,13 +442,13 @@ public sealed class UnityZoneServerRuntime : IDisposable
                         BuildInventorySummary(player),
                         string.Empty,
                         0,
-                        player.GatheringSkill),
+                        player.GetPrimaryGatheringSkill()),
                     cancellationToken).ConfigureAwait(false);
                 return;
             default:
                 await SendToPlayerAsync(
                     player,
-                    new GameplayResultMessage(command.SessionId, command.CommandId, false, "Unsupported gameplay command.", string.Empty, 0, player.GatheringSkill),
+                    new GameplayResultMessage(command.SessionId, command.CommandId, false, "Unsupported gameplay command.", string.Empty, 0, player.GetPrimaryGatheringSkill()),
                     cancellationToken).ConfigureAwait(false);
                 return;
         }
@@ -400,7 +460,7 @@ public sealed class UnityZoneServerRuntime : IDisposable
         {
             await SendToPlayerAsync(
                 player,
-                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Gather on cooldown.", string.Empty, 0, player.GatheringSkill),
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Gather on cooldown.", string.Empty, 0, player.GetPrimaryGatheringSkill()),
                 cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -415,7 +475,7 @@ public sealed class UnityZoneServerRuntime : IDisposable
         {
             await SendToPlayerAsync(
                 player,
-                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Unknown resource node.", string.Empty, 0, player.GatheringSkill),
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Unknown resource node.", string.Empty, 0, player.GetPrimaryGatheringSkill()),
                 cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -425,7 +485,7 @@ public sealed class UnityZoneServerRuntime : IDisposable
         {
             await SendToPlayerAsync(
                 player,
-                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Too far away to gather.", string.Empty, 0, player.GatheringSkill),
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Too far away to gather.", string.Empty, 0, player.GetPrimaryGatheringSkill()),
                 cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -445,31 +505,352 @@ public sealed class UnityZoneServerRuntime : IDisposable
         {
             await SendToPlayerAsync(
                 player,
-                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Node is depleted.", node.ItemId, player.GetItemCount(node.ItemId), player.GatheringSkill),
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Node is depleted.", node.ItemId, player.GetItemCount(node.ItemId), player.GetPrimaryGatheringSkill()),
                 cancellationToken).ConfigureAwait(false);
             return;
         }
 
-        var amount = Math.Max(1, player.GatheringSkill / 10);
+        var skillKind = ResolveSkillKind(node.ItemId);
+        var currentSkill = player.GetSkillValue(skillKind);
+        var yieldMultiplier = player.GetGatherYieldMultiplier(DateTimeOffset.UtcNow);
+        var amount = Math.Max(1, Mathf.RoundToInt((currentSkill / 8f) * yieldMultiplier));
         player.AddItem(node.ItemId, amount);
-        player.GatherAttempts++;
-        if (player.GatherAttempts % 3 == 0)
+        var attempts = player.IncrementGatherAttempts(skillKind);
+        if (attempts % 3 == 0)
         {
-            player.GatheringSkill++;
+            player.IncreaseSkill(skillKind, 1);
         }
 
-        player.NextGatherAllowedUtc = DateTimeOffset.UtcNow.AddMilliseconds(750);
+        var gatherCooldownMultiplier = player.GetGatherCooldownMultiplier(DateTimeOffset.UtcNow);
+        var cooldownMs = Mathf.Clamp(Mathf.RoundToInt(750f * gatherCooldownMultiplier), 250, 3000);
+        player.NextGatherAllowedUtc = DateTimeOffset.UtcNow.AddMilliseconds(cooldownMs);
+        var updatedSkill = player.GetSkillValue(skillKind);
         await SendToPlayerAsync(
             player,
             new GameplayResultMessage(
                 command.SessionId,
                 command.CommandId,
                 true,
-                "Gathered " + amount + " " + node.ItemId + ".",
+                "Gathered " + amount + " " + node.ItemId + " (x" + yieldMultiplier.ToString("F2") + ").",
                 node.ItemId,
                 player.GetItemCount(node.ItemId),
-                player.GatheringSkill),
+                updatedSkill),
             cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task HandleFarmingAsync(ZonePlayer player, GameplayCommandMessage command, CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var target = (command.TargetId ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(target))
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Use target 'plant:<crop>' or 'harvest'.", string.Empty, 0, player.FarmingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (target.StartsWith("plant:", StringComparison.OrdinalIgnoreCase))
+        {
+            var cropId = target.Substring("plant:".Length).Trim().ToLowerInvariant();
+            if (string.IsNullOrWhiteSpace(cropId))
+            {
+                cropId = "wheat";
+            }
+
+            FarmPlot existing;
+            lock (_farmSync)
+            {
+                existing = _farmPlots.Values.FirstOrDefault(plot =>
+                    plot.OwnerPlayerId == player.PlayerId &&
+                    DistanceSquared(plot.Position, player.Position) <= 4f);
+                if (existing == null)
+                {
+                    var plotId = "plot-" + player.PlayerId + "-" + _tick + "-" + _farmPlots.Count;
+                    var readyInSeconds = Math.Max(8, 18 - (player.FarmingSkill / 10));
+                    _farmPlots[plotId] = new FarmPlot(plotId, player.PlayerId, cropId, player.Position, now.AddSeconds(readyInSeconds));
+                }
+            }
+
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, true, "Planted " + cropId + ".", cropId, player.GetItemCount(cropId), player.FarmingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (!target.Equals("harvest", StringComparison.OrdinalIgnoreCase))
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Unknown farming action.", string.Empty, 0, player.FarmingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        FarmPlot plotToHarvest = null;
+        lock (_farmSync)
+        {
+            plotToHarvest = _farmPlots.Values.FirstOrDefault(plot =>
+                plot.OwnerPlayerId == player.PlayerId &&
+                plot.ReadyAtUtc <= now &&
+                DistanceSquared(plot.Position, player.Position) <= 9f);
+            if (plotToHarvest != null)
+            {
+                _farmPlots.Remove(plotToHarvest.PlotId);
+            }
+        }
+
+        if (plotToHarvest == null)
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "No ready farm plot nearby.", string.Empty, 0, player.FarmingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var yield = Math.Max(1, Mathf.FloorToInt(player.FarmingSkill / 12f) + 1);
+        player.AddItem(plotToHarvest.CropId, yield);
+        player.FarmingAttempts++;
+        if (player.FarmingAttempts % 2 == 0)
+        {
+            player.FarmingSkill = Math.Min(100, player.FarmingSkill + 1);
+        }
+
+        await SendToPlayerAsync(
+            player,
+            new GameplayResultMessage(
+                command.SessionId,
+                command.CommandId,
+                true,
+                "Harvested " + yield + " " + plotToHarvest.CropId + ".",
+                plotToHarvest.CropId,
+                player.GetItemCount(plotToHarvest.CropId),
+                player.FarmingSkill),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task HandleTameAsync(ZonePlayer player, GameplayCommandMessage command, CancellationToken cancellationToken)
+    {
+        var targetMobId = (command.TargetId ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(targetMobId))
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Target mob id is required for taming.", string.Empty, 0, player.AnimalTamingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        ZoneMob mob;
+        lock (_mobSync)
+        {
+            _mobs.TryGetValue(targetMobId, out mob);
+        }
+
+        if (mob == null)
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Unknown mob.", string.Empty, 0, player.AnimalTamingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (DistanceSquared(player.Position, mob.Position) > 16f)
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Too far away to tame this creature.", string.Empty, 0, player.AnimalTamingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        player.AnimalTamingAttempts++;
+        var successChance = Mathf.Clamp01(0.15f + (player.AnimalTamingSkill / 150f));
+        if (UnityEngine.Random.value > successChance)
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Taming failed.", string.Empty, 0, player.AnimalTamingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        lock (_mobSync)
+        {
+            if (_mobs.TryGetValue(targetMobId, out mob))
+            {
+                mob.OwnerPlayerId = player.PlayerId;
+                mob.State = "Companion";
+            }
+        }
+
+        if (player.AnimalTamingAttempts % 2 == 0)
+        {
+            player.AnimalTamingSkill = Math.Min(100, player.AnimalTamingSkill + 1);
+        }
+
+        await SendToPlayerAsync(
+            player,
+            new GameplayResultMessage(
+                command.SessionId,
+                command.CommandId,
+                true,
+                "Tamed " + targetMobId + ". It will now follow you.",
+                string.Empty,
+                0,
+                player.AnimalTamingSkill),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task HandleCraftAsync(ZonePlayer player, GameplayCommandMessage command, CancellationToken cancellationToken)
+    {
+        var recipeId = (command.TargetId ?? string.Empty).Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(recipeId))
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Recipe id is required.", string.Empty, 0, player.CraftingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var recipe = CraftRecipe.Resolve(recipeId);
+        if (recipe == null)
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Unknown recipe '" + recipeId + "'.", string.Empty, 0, player.CraftingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (!player.TryConsumeItem(recipe.InputItemId, recipe.InputAmount))
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Missing ingredients: " + recipe.InputAmount + " " + recipe.InputItemId + ".", string.Empty, 0, player.CraftingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var bonusOutput = player.CraftingSkill >= 40 && UnityEngine.Random.value < 0.25f ? 1 : 0;
+        var totalOutput = recipe.OutputAmount + bonusOutput;
+        player.AddItem(recipe.OutputItemId, totalOutput);
+        player.CraftingAttempts++;
+        if (player.CraftingAttempts % 2 == 0)
+        {
+            player.CraftingSkill = Math.Min(100, player.CraftingSkill + 1);
+        }
+
+        await SendToPlayerAsync(
+            player,
+            new GameplayResultMessage(
+                command.SessionId,
+                command.CommandId,
+                true,
+                "Crafted " + totalOutput + " " + recipe.OutputItemId + ".",
+                recipe.OutputItemId,
+                player.GetItemCount(recipe.OutputItemId),
+                player.CraftingSkill),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task HandleCastSpellAsync(ZonePlayer player, GameplayCommandMessage command, CancellationToken cancellationToken)
+    {
+        var now = DateTimeOffset.UtcNow;
+        var spellId = (command.TargetId ?? string.Empty).Trim().ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(spellId))
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Spell id is required.", string.Empty, 0, player.CraftingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var spell = SpellDefinition.Resolve(spellId);
+        if (spell == null)
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Unknown spell '" + spellId + "'.", string.Empty, 0, player.CraftingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (now < player.NextSpellAllowedUtc)
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Spell is on cooldown.", string.Empty, 0, player.CraftingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (player.Mana < spell.ManaCost)
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Not enough mana.", string.Empty, 0, player.CraftingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        player.Mana -= spell.ManaCost;
+        player.NextSpellAllowedUtc = now.AddSeconds(spell.CooldownSeconds);
+        player.ActiveEffects.RemoveAll(effect => effect.EffectType == spell.EffectType);
+        player.ActiveEffects.Add(new ActiveSpellEffect(spell.EffectType, now.AddSeconds(spell.DurationSeconds), spell.Power));
+        player.CraftingSkill = Math.Min(100, player.CraftingSkill + 1);
+
+        await SendToPlayerAsync(
+            player,
+            new GameplayResultMessage(
+                command.SessionId,
+                command.CommandId,
+                true,
+                "Cast " + spell.DisplayName + " (" + spell.EffectType + "). Mana " + player.Mana + "/" + MaxMana + ".",
+                string.Empty,
+                0,
+                player.CraftingSkill),
+            cancellationToken).ConfigureAwait(false);
+    }
+
+    private void UpdateMagicEffects(float deltaSeconds)
+    {
+        var now = DateTimeOffset.UtcNow;
+        foreach (var player in _players.Values)
+        {
+            player.ActiveEffects.RemoveAll(effect => effect.ExpiresUtc <= now);
+            player.ManaRegenAccumulator += deltaSeconds;
+            var manaRegenMultiplier = player.GetManaRegenMultiplier(now);
+            if (player.ManaRegenAccumulator >= 1f / manaRegenMultiplier)
+            {
+                var ticks = Mathf.FloorToInt(player.ManaRegenAccumulator * manaRegenMultiplier);
+                player.Mana = Math.Min(MaxMana, player.Mana + ticks);
+                player.ManaRegenAccumulator = Math.Max(0f, player.ManaRegenAccumulator - (ticks / manaRegenMultiplier));
+            }
+        }
+    }
+
+    private void UpdateFarmPlots()
+    {
+        var now = DateTimeOffset.UtcNow;
+        lock (_farmSync)
+        {
+            var expired = _farmPlots.Values
+                .Where(plot => now - plot.ReadyAtUtc > TimeSpan.FromMinutes(10))
+                .Select(plot => plot.PlotId)
+                .ToArray();
+
+            foreach (var plotId in expired)
+            {
+                _farmPlots.Remove(plotId);
+            }
+        }
     }
 
     private async Task SendToPlayerAsync(ZonePlayer player, TcpMessage message, CancellationToken cancellationToken)
@@ -554,6 +935,12 @@ public sealed class UnityZoneServerRuntime : IDisposable
             var nowUtc = DateTimeOffset.UtcNow;
             foreach (var mob in _mobs.Values)
             {
+                if (mob.OwnerPlayerId.HasValue && TryGetPlayerById(mob.OwnerPlayerId.Value, out var owner))
+                {
+                    mob.TargetPosition = _definition.Clamp(owner.Position);
+                    mob.State = "Companion";
+                }
+
                 var toTargetX = mob.TargetPosition.X - mob.Position.X;
                 var toTargetZ = mob.TargetPosition.Z - mob.Position.Z;
                 var distanceSq = (toTargetX * toTargetX) + (toTargetZ * toTargetZ);
@@ -599,6 +986,21 @@ public sealed class UnityZoneServerRuntime : IDisposable
         {
             return (float)(min + (_random.NextDouble() * (max - min)));
         }
+    }
+
+    private bool TryGetPlayerById(ulong playerId, out ZonePlayer player)
+    {
+        foreach (var entry in _players.Values)
+        {
+            if (entry.PlayerId == playerId)
+            {
+                player = entry;
+                return true;
+            }
+        }
+
+        player = null;
+        return false;
     }
 
     private MobSnapshot[] CreateMobSnapshots()
@@ -755,11 +1157,58 @@ public sealed class UnityZoneServerRuntime : IDisposable
         return DistanceSquared(origin, target) <= AoiRadiusSquared;
     }
 
+    private static NetworkVector3 NormalizeMoveInput(NetworkVector3 move)
+    {
+        var planarMagnitudeSq = (move.X * move.X) + (move.Z * move.Z);
+        if (planarMagnitudeSq < MinMoveMagnitude * MinMoveMagnitude)
+        {
+            return NetworkVector3.Zero;
+        }
+
+        if (planarMagnitudeSq <= MaxMoveMagnitude * MaxMoveMagnitude)
+        {
+            return new NetworkVector3(move.X, 0f, move.Z);
+        }
+
+        var planarMagnitude = Mathf.Sqrt(planarMagnitudeSq);
+        if (planarMagnitude <= 0.0001f)
+        {
+            return NetworkVector3.Zero;
+        }
+
+        var scale = MaxMoveMagnitude / planarMagnitude;
+        return new NetworkVector3(move.X * scale, 0f, move.Z * scale);
+    }
+
+    private static bool IsFiniteInput(ClientInputMessage input)
+        => float.IsFinite(input.DeltaTimeSeconds)
+            && float.IsFinite(input.Move.X)
+            && float.IsFinite(input.Move.Y)
+            && float.IsFinite(input.Move.Z);
+
     private static string BuildInventorySummary(ZonePlayer player)
     {
         var logCount = player.GetItemCount("log");
         var oreCount = player.GetItemCount("ore");
-        return "Inventory -> log: " + logCount + ", ore: " + oreCount + " | Gathering " + player.GatheringSkill;
+        var wheatCount = player.GetItemCount("wheat");
+        return "Inventory -> log: " + logCount + ", ore: " + oreCount + ", wheat: " + wheatCount
+            + " | Woodcutting " + player.WoodcuttingSkill
+            + " | Mining " + player.MiningSkill
+            + " | Crafting " + player.CraftingSkill
+            + " | Farming " + player.FarmingSkill
+            + " | Taming " + player.AnimalTamingSkill
+            + " | Mana " + player.Mana + "/" + MaxMana
+            + " | Effects " + player.ActiveEffects.Count;
+    }
+
+    private static SkillKind ResolveSkillKind(string itemId)
+    {
+        return itemId switch
+        {
+            "ore" => SkillKind.Mining,
+            "log" => SkillKind.Woodcutting,
+            _ => SkillKind.Gathering
+        };
     }
 
     private async Task MaybeTransferAsync(ZonePlayer player, CancellationToken cancellationToken)
@@ -968,6 +1417,12 @@ public sealed class UnityZoneServerRuntime : IDisposable
             Velocity = NetworkVector3.Zero;
             LastTcpSeenUtc = DateTimeOffset.UtcNow;
             LastUdpSeenUtc = DateTimeOffset.UtcNow;
+            WoodcuttingSkill = 1;
+            MiningSkill = 1;
+            CraftingSkill = 1;
+            FarmingSkill = 1;
+            AnimalTamingSkill = 1;
+            Mana = MaxMana;
         }
 
         public ulong PlayerId { get; }
@@ -979,14 +1434,27 @@ public sealed class UnityZoneServerRuntime : IDisposable
         public int? PendingDestinationZoneId { get; set; }
         public Guid? LastIssuedTransferId { get; set; }
         public int? LastPrewarmedZoneId { get; set; }
-        public int GatheringSkill { get; set; }
-        public int GatherAttempts { get; set; }
+        public int WoodcuttingSkill { get; set; }
+        public int MiningSkill { get; set; }
+        public int CraftingSkill { get; set; }
+        public int FarmingSkill { get; set; }
+        public int AnimalTamingSkill { get; set; }
+        public int CraftingAttempts { get; set; }
+        public int WoodcuttingAttempts { get; set; }
+        public int MiningAttempts { get; set; }
+        public int GatheringAttempts { get; set; }
+        public int FarmingAttempts { get; set; }
+        public int AnimalTamingAttempts { get; set; }
+        public int Mana { get; set; }
+        public float ManaRegenAccumulator { get; set; }
+        public DateTimeOffset NextSpellAllowedUtc { get; set; }
         public DateTimeOffset NextGatherAllowedUtc { get; set; }
         public DateTimeOffset LastTcpSeenUtc { get; set; }
         public DateTimeOffset LastUdpSeenUtc { get; set; }
         public DateTimeOffset? DisconnectGraceDeadlineUtc { get; set; }
         public uint LastAcceptedInputSequence { get; set; }
         public SemaphoreSlim ControlWriteLock { get; } = new SemaphoreSlim(1, 1);
+        public List<ActiveSpellEffect> ActiveEffects { get; } = new List<ActiveSpellEffect>();
 
         private readonly Dictionary<string, int> _inventory = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
 
@@ -1001,6 +1469,255 @@ public sealed class UnityZoneServerRuntime : IDisposable
         {
             int count;
             return _inventory.TryGetValue(itemId, out count) ? count : 0;
+        }
+
+        public bool TryConsumeItem(string itemId, int amount)
+        {
+            if (amount <= 0)
+            {
+                return true;
+            }
+
+            int existing;
+            if (!_inventory.TryGetValue(itemId, out existing) || existing < amount)
+            {
+                return false;
+            }
+
+            var next = existing - amount;
+            if (next <= 0)
+            {
+                _inventory.Remove(itemId);
+            }
+            else
+            {
+                _inventory[itemId] = next;
+            }
+
+            return true;
+        }
+
+        public int GetPrimaryGatheringSkill()
+        {
+            return Math.Max(WoodcuttingSkill, MiningSkill);
+        }
+
+        public int GetSkillValue(SkillKind skillKind)
+        {
+            return skillKind switch
+            {
+                SkillKind.Woodcutting => WoodcuttingSkill,
+                SkillKind.Mining => MiningSkill,
+                SkillKind.Crafting => CraftingSkill,
+                _ => GetPrimaryGatheringSkill()
+            };
+        }
+
+        public int IncrementGatherAttempts(SkillKind skillKind)
+        {
+            switch (skillKind)
+            {
+                case SkillKind.Woodcutting:
+                    WoodcuttingAttempts++;
+                    return WoodcuttingAttempts;
+                case SkillKind.Mining:
+                    MiningAttempts++;
+                    return MiningAttempts;
+                default:
+                    GatheringAttempts++;
+                    return GatheringAttempts;
+            }
+        }
+
+        public void IncreaseSkill(SkillKind skillKind, int amount)
+        {
+            amount = Math.Max(amount, 0);
+            switch (skillKind)
+            {
+                case SkillKind.Woodcutting:
+                    WoodcuttingSkill += amount;
+                    break;
+                case SkillKind.Mining:
+                    MiningSkill += amount;
+                    break;
+                case SkillKind.Crafting:
+                    CraftingSkill += amount;
+                    break;
+                default:
+                    WoodcuttingSkill += amount;
+                    MiningSkill += amount;
+                    break;
+            }
+        }
+
+        public float GetMovementSpeedMultiplier(DateTimeOffset now)
+        {
+            var speedMultiplier = 1f;
+            foreach (var effect in ActiveEffects)
+            {
+                if (effect.ExpiresUtc <= now)
+                {
+                    continue;
+                }
+
+                if (effect.EffectType == SpellEffectType.Haste)
+                {
+                    speedMultiplier += effect.Power;
+                }
+            }
+
+            return Mathf.Clamp(speedMultiplier, 0.2f, 2.5f);
+        }
+
+        public float GetManaRegenMultiplier(DateTimeOffset now)
+        {
+            var value = 1f;
+            foreach (var effect in ActiveEffects)
+            {
+                if (effect.ExpiresUtc > now && effect.EffectType == SpellEffectType.Rejuvenation)
+                {
+                    value += effect.Power;
+                }
+            }
+
+            return Mathf.Clamp(value, 0.25f, 4f);
+        }
+
+        public float GetGatherYieldMultiplier(DateTimeOffset now)
+        {
+            var value = 1f;
+            foreach (var effect in ActiveEffects)
+            {
+                if (effect.ExpiresUtc > now && effect.EffectType == SpellEffectType.StoneSkin)
+                {
+                    value += effect.Power;
+                }
+            }
+
+            return Mathf.Clamp(value, 0.25f, 3f);
+        }
+
+        public float GetGatherCooldownMultiplier(DateTimeOffset now)
+        {
+            var value = 1f;
+            foreach (var effect in ActiveEffects)
+            {
+                if (effect.ExpiresUtc > now && effect.EffectType == SpellEffectType.StoneSkin)
+                {
+                    value -= (effect.Power * 0.35f);
+                }
+            }
+
+            return Mathf.Clamp(value, 0.35f, 2.5f);
+        }
+    }
+
+    private enum SkillKind
+    {
+        Gathering = 0,
+        Woodcutting = 1,
+        Mining = 2,
+        Crafting = 3
+    }
+
+    private sealed class CraftRecipe
+    {
+        private CraftRecipe(string recipeId, string inputItemId, int inputAmount, string outputItemId, int outputAmount)
+        {
+            RecipeId = recipeId;
+            InputItemId = inputItemId;
+            InputAmount = inputAmount;
+            OutputItemId = outputItemId;
+            OutputAmount = outputAmount;
+        }
+
+        public string RecipeId { get; }
+        public string InputItemId { get; }
+        public int InputAmount { get; }
+        public string OutputItemId { get; }
+        public int OutputAmount { get; }
+
+        public static CraftRecipe Resolve(string recipeId)
+        {
+            return recipeId switch
+            {
+                "plank" => new CraftRecipe("plank", "log", 2, "plank", 1),
+                "ingot" => new CraftRecipe("ingot", "ore", 2, "ingot", 1),
+                "flour" => new CraftRecipe("flour", "wheat", 2, "flour", 1),
+                _ => null
+            };
+        }
+    }
+
+    private sealed class FarmPlot
+    {
+        public FarmPlot(string plotId, ulong ownerPlayerId, string cropId, NetworkVector3 position, DateTimeOffset readyAtUtc)
+        {
+            PlotId = plotId;
+            OwnerPlayerId = ownerPlayerId;
+            CropId = cropId;
+            Position = position;
+            ReadyAtUtc = readyAtUtc;
+        }
+
+        public string PlotId { get; }
+        public ulong OwnerPlayerId { get; }
+        public string CropId { get; }
+        public NetworkVector3 Position { get; }
+        public DateTimeOffset ReadyAtUtc { get; }
+    }
+
+    private enum SpellEffectType
+    {
+        Haste = 1,
+        StoneSkin = 2,
+        Rejuvenation = 3
+    }
+
+    private sealed class ActiveSpellEffect
+    {
+        public ActiveSpellEffect(SpellEffectType effectType, DateTimeOffset expiresUtc, float power)
+        {
+            EffectType = effectType;
+            ExpiresUtc = expiresUtc;
+            Power = power;
+        }
+
+        public SpellEffectType EffectType { get; }
+        public DateTimeOffset ExpiresUtc { get; }
+        public float Power { get; }
+    }
+
+    private sealed class SpellDefinition
+    {
+        private SpellDefinition(string spellId, string displayName, SpellEffectType effectType, int manaCost, float durationSeconds, float cooldownSeconds, float power)
+        {
+            SpellId = spellId;
+            DisplayName = displayName;
+            EffectType = effectType;
+            ManaCost = manaCost;
+            DurationSeconds = durationSeconds;
+            CooldownSeconds = cooldownSeconds;
+            Power = power;
+        }
+
+        public string SpellId { get; }
+        public string DisplayName { get; }
+        public SpellEffectType EffectType { get; }
+        public int ManaCost { get; }
+        public float DurationSeconds { get; }
+        public float CooldownSeconds { get; }
+        public float Power { get; }
+
+        public static SpellDefinition Resolve(string spellId)
+        {
+            return spellId switch
+            {
+                "haste" => new SpellDefinition("haste", "Haste", SpellEffectType.Haste, 20, 12f, 8f, 0.35f),
+                "stoneskin" => new SpellDefinition("stoneskin", "Stone Skin", SpellEffectType.StoneSkin, 30, 18f, 10f, 0.25f),
+                "rejuvenation" => new SpellDefinition("rejuvenation", "Rejuvenation", SpellEffectType.Rejuvenation, 25, 10f, 10f, 0.5f),
+                _ => null
+            };
         }
     }
 
@@ -1049,6 +1766,7 @@ public sealed class UnityZoneServerRuntime : IDisposable
         public float Speed { get; private set; }
         public float WanderRadius { get; private set; }
         public string State { get; set; }
+        public ulong? OwnerPlayerId { get; set; }
     }
 
     private struct CellKey : IEquatable<CellKey>

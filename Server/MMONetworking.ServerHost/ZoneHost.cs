@@ -13,6 +13,11 @@ namespace MMONetworking.ServerHost;
 
 public sealed class ZoneHost : IDisposable
 {
+    private const float MaxInputDeltaSeconds = 0.1f;
+    private const uint MaxInputSequenceAdvance = 600;
+    private const float MaxMoveMagnitude = 1f;
+    private const float MinMoveMagnitude = 0.05f;
+    private const float PlayerMoveSpeed = 6f;
     private readonly ZoneDefinition _definition;
     private readonly ZoneDirectory _zoneDirectory;
     private readonly SessionRegistry _sessionRegistry;
@@ -244,6 +249,26 @@ public sealed class ZoneHost : IDisposable
                     case ClientInputMessage input:
                     if (_players.TryGetValue(input.SessionId, out var player))
                     {
+                        if (!IsFiniteInput(input))
+                        {
+                            if (input.Sequence % 20 == 0)
+                            {
+                                Console.WriteLine($"Zone {_definition.ZoneId} rejected non-finite input seq {input.Sequence} for session {input.SessionId}.");
+                            }
+
+                            break;
+                        }
+
+                        if (player.RemoteEndpoint is not null && !result.RemoteEndPoint.Equals(player.RemoteEndpoint))
+                        {
+                            if (input.Sequence % 20 == 0)
+                            {
+                                Console.WriteLine($"Zone {_definition.ZoneId} rejected endpoint-mismatch input seq {input.Sequence} for session {input.SessionId}; expected {player.RemoteEndpoint}, got {result.RemoteEndPoint}.");
+                            }
+
+                            break;
+                        }
+
                         if (input.Sequence <= player.LastAcceptedInputSequence)
                         {
                             if (input.Sequence % 20 == 0)
@@ -253,11 +278,23 @@ public sealed class ZoneHost : IDisposable
                             break;
                         }
 
+                        if (input.Sequence - player.LastAcceptedInputSequence > MaxInputSequenceAdvance)
+                        {
+                            if (input.Sequence % 20 == 0)
+                            {
+                                Console.WriteLine($"Zone {_definition.ZoneId} rejected sequence-jump input seq {input.Sequence} for session {input.SessionId}; last accepted {player.LastAcceptedInputSequence}.");
+                            }
+
+                            break;
+                        }
+
                         player.LastAcceptedInputSequence = input.Sequence;
                         player.RemoteEndpoint = result.RemoteEndPoint;
-                        player.Velocity = input.Move * 6f;
-                        player.Position += player.Velocity * Math.Clamp(input.DeltaTimeSeconds, 0f, 0.1f);
+                        var normalizedMove = NormalizeMoveInput(input.Move);
+                        player.Velocity = normalizedMove * PlayerMoveSpeed;
+                        player.Position += player.Velocity * Math.Clamp(input.DeltaTimeSeconds, 0f, MaxInputDeltaSeconds);
                         player.Position = new NetworkVector3(player.Position.X, 0f, player.Position.Z);
+                        player.Position = _definition.Clamp(player.Position);
                         _sessionRegistry.SetCurrentZone(player.SessionId, _definition.ZoneId, player.Position);
                         _sessionRegistry.TouchUdp(player.SessionId);
                         if (input.Sequence % 20 == 0)
@@ -564,6 +601,35 @@ public sealed class ZoneHost : IDisposable
         var dz = origin.Z - target.Z;
         return (dx * dx) + (dz * dz) <= _aoiRadiusSquared;
     }
+
+    private static NetworkVector3 NormalizeMoveInput(NetworkVector3 move)
+    {
+        var planarMagnitudeSq = (move.X * move.X) + (move.Z * move.Z);
+        if (planarMagnitudeSq < MinMoveMagnitude * MinMoveMagnitude)
+        {
+            return NetworkVector3.Zero;
+        }
+
+        if (planarMagnitudeSq <= MaxMoveMagnitude * MaxMoveMagnitude)
+        {
+            return new NetworkVector3(move.X, 0f, move.Z);
+        }
+
+        var planarMagnitude = MathF.Sqrt(planarMagnitudeSq);
+        if (planarMagnitude <= 0.0001f)
+        {
+            return NetworkVector3.Zero;
+        }
+
+        var scale = MaxMoveMagnitude / planarMagnitude;
+        return new NetworkVector3(move.X * scale, 0f, move.Z * scale);
+    }
+
+    private static bool IsFiniteInput(ClientInputMessage input)
+        => float.IsFinite(input.DeltaTimeSeconds)
+            && float.IsFinite(input.Move.X)
+            && float.IsFinite(input.Move.Y)
+            && float.IsFinite(input.Move.Z);
 
     private void UpdateMobs(float deltaSeconds)
     {
