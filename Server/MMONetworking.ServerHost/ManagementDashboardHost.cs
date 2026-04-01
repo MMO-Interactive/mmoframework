@@ -1,5 +1,8 @@
 using System;
+using System.IO;
 using System.Linq;
+using System.Net.Http;
+using System.Net.Http.Json;
 using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
@@ -60,6 +63,9 @@ public sealed class ManagementDashboardHost
         builder.WebHost.UseUrls($"http://0.0.0.0:{_port}");
 
         var app = builder.Build();
+        var assetApiBaseUrl = Environment.GetEnvironmentVariable("MMO_ASSET_API_BASE_URL")?.TrimEnd('/')
+            ?? "http://127.0.0.1:7095";
+        var assetApiKey = Environment.GetEnvironmentVariable("MMO_ASSET_API_KEY");
 
         app.MapGet("/api/dashboard", () => Results.Json(CreateSnapshot()));
         app.MapPost("/api/accounts/characters/list", async (HttpContext context) =>
@@ -698,6 +704,136 @@ public sealed class ManagementDashboardHost
                 return Results.BadRequest(new { error = ex.Message });
             }
         });
+        app.MapPost("/api/assets/upload", async (HttpContext context) =>
+        {
+            if (!context.Request.HasFormContentType)
+            {
+                return Results.BadRequest(new { error = "multipart/form-data body is required." });
+            }
+
+            var form = await context.Request.ReadFormAsync(context.RequestAborted).ConfigureAwait(false);
+            var file = form.Files["asset"];
+            if (file is null || file.Length <= 0)
+            {
+                return Results.BadRequest(new { error = "asset file is required." });
+            }
+
+            var sourceName = string.IsNullOrWhiteSpace(form["sourceName"]) ? file.FileName : form["sourceName"].ToString().Trim();
+            var assetType = string.IsNullOrWhiteSpace(form["assetType"]) ? "generic" : form["assetType"].ToString().Trim().ToLowerInvariant();
+            var bundleName = form["bundleName"].ToString().Trim();
+            var bundleVersion = form["bundleVersion"].ToString().Trim();
+            var platform = form["platform"].ToString().Trim();
+            var unityVersion = form["unityVersion"].ToString().Trim();
+            var notes = form["notes"].ToString().Trim();
+            var targetUrl = $"{assetApiBaseUrl}/api/assets/artifacts?sourceName={Uri.EscapeDataString(sourceName)}";
+
+            using var http = new HttpClient();
+            if (!string.IsNullOrWhiteSpace(assetApiKey))
+            {
+                http.DefaultRequestHeaders.Add("X-Asset-Api-Key", assetApiKey);
+            }
+            await using var fileStream = file.OpenReadStream();
+            using var payload = new StreamContent(fileStream);
+            payload.Headers.ContentType = new System.Net.Http.Headers.MediaTypeHeaderValue("application/octet-stream");
+            using var response = await http.PostAsync(targetUrl, payload, context.RequestAborted).ConfigureAwait(false);
+            var responseText = await response.Content.ReadAsStringAsync(context.RequestAborted).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                return Results.BadRequest(new
+                {
+                    error = $"Asset API rejected upload with HTTP {(int)response.StatusCode}.",
+                    details = responseText
+                });
+            }
+
+            var parsed = JsonSerializer.Deserialize<JsonElement>(responseText);
+            object? bundleRegistration = null;
+            if (!string.IsNullOrWhiteSpace(bundleName)
+                && !string.IsNullOrWhiteSpace(bundleVersion)
+                && !string.IsNullOrWhiteSpace(platform)
+                && !string.IsNullOrWhiteSpace(unityVersion)
+                && parsed.ValueKind == JsonValueKind.Object
+                && parsed.TryGetProperty("hash", out var hashElement))
+            {
+                var hash = hashElement.GetString();
+                if (!string.IsNullOrWhiteSpace(hash))
+                {
+                    var registerUrl = $"{assetApiBaseUrl}/api/assets/bundles/{Uri.EscapeDataString(bundleName)}/versions";
+                    var requestPayload = new
+                    {
+                        version = bundleVersion,
+                        artifactHash = hash,
+                        platform,
+                        unityVersion,
+                        assetType,
+                        notes = string.IsNullOrWhiteSpace(notes) ? null : notes
+                    };
+
+                    using var registerResponse = await http.PostAsJsonAsync(registerUrl, requestPayload, context.RequestAborted).ConfigureAwait(false);
+                    var registerText = await registerResponse.Content.ReadAsStringAsync(context.RequestAborted).ConfigureAwait(false);
+                    bundleRegistration = registerResponse.IsSuccessStatusCode
+                        ? JsonSerializer.Deserialize<JsonElement>(registerText)
+                        : new
+                        {
+                            error = $"Bundle registration failed with HTTP {(int)registerResponse.StatusCode}.",
+                            details = registerText
+                        };
+                }
+            }
+            return Results.Json(new
+            {
+                assetApiBaseUrl,
+                sourceName,
+                assetType,
+                artifact = parsed,
+                bundleRegistration
+            });
+        });
+        app.MapGet("/api/assets/zone-assets", async (HttpContext context) =>
+        {
+            var targetUrl = $"{assetApiBaseUrl}/api/assets/bundles?assetType=zone";
+            using var http = new HttpClient();
+            if (!string.IsNullOrWhiteSpace(assetApiKey))
+            {
+                http.DefaultRequestHeaders.Add("X-Asset-Api-Key", assetApiKey);
+            }
+            using var response = await http.GetAsync(targetUrl, context.RequestAborted).ConfigureAwait(false);
+            var responseText = await response.Content.ReadAsStringAsync(context.RequestAborted).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                return Results.BadRequest(new
+                {
+                    error = $"Asset API bundle listing failed with HTTP {(int)response.StatusCode}.",
+                    details = responseText
+                });
+            }
+
+            var parsed = JsonSerializer.Deserialize<JsonElement>(responseText);
+            return Results.Json(parsed);
+        });
+        app.MapGet("/api/assets/stats", async (HttpContext context) =>
+        {
+            var targetUrl = $"{assetApiBaseUrl}/api/assets/stats";
+            using var http = new HttpClient();
+            if (!string.IsNullOrWhiteSpace(assetApiKey))
+            {
+                http.DefaultRequestHeaders.Add("X-Asset-Api-Key", assetApiKey);
+            }
+
+            using var response = await http.GetAsync(targetUrl, context.RequestAborted).ConfigureAwait(false);
+            var responseText = await response.Content.ReadAsStringAsync(context.RequestAborted).ConfigureAwait(false);
+            if (!response.IsSuccessStatusCode)
+            {
+                return Results.BadRequest(new
+                {
+                    error = $"Asset API stats request failed with HTTP {(int)response.StatusCode}.",
+                    details = responseText
+                });
+            }
+
+            var parsed = JsonSerializer.Deserialize<JsonElement>(responseText);
+            return Results.Json(parsed);
+        });
         app.MapGet("/", async context =>
         {
             context.Response.ContentType = "text/html; charset=utf-8";
@@ -777,6 +913,11 @@ public sealed class ManagementDashboardHost
         {
             context.Response.ContentType = "text/html; charset=utf-8";
             await context.Response.WriteAsync(BuildInvasionPage(), cancellationToken);
+        });
+        app.MapGet("/tools/assets", async context =>
+        {
+            context.Response.ContentType = "text/html; charset=utf-8";
+            await context.Response.WriteAsync(BuildAssetUploadPage(), cancellationToken);
         });
         app.MapGet("/map", async context =>
         {
@@ -1140,6 +1281,7 @@ public sealed class ManagementDashboardHost
           <a class="btn" href="/tools">Tool Directory</a>
           <a class="btn" href="/tools/moderation">Moderation</a>
           <a class="btn" href="/tools/invasions">Invasions</a>
+          <a class="btn" href="/tools/assets">Assets</a>
         </div>
       </article>
       <aside class="card hero-side">
@@ -1197,6 +1339,7 @@ public sealed class ManagementDashboardHost
             <a class="ops-tile btn" href="/tools/quests"><strong>Quests</strong><span class="muted">Manage quest definitions, progress state, and reward claims.</span></a>
             <a class="ops-tile btn" href="/tools/world-events"><strong>World Events</strong><span class="muted">Advance event state, inspect contributions, and manage rewards.</span></a>
             <a class="ops-tile btn" href="/tools/invasions"><strong>Invasions</strong><span class="muted">Control invasion waves and kill-credit payouts.</span></a>
+            <a class="ops-tile btn" href="/tools/assets"><strong>Assets</strong><span class="muted">Upload Unity bundles through the dedicated Asset Server API.</span></a>
           </div>
         </article>
 
@@ -1569,6 +1712,7 @@ public sealed class ManagementDashboardHost
       <div class="badge"><a href="/tools/quests" style="color:inherit;text-decoration:none;">Quest Tool</a></div>
       <div class="badge"><a href="/tools/world-events" style="color:inherit;text-decoration:none;">World Events</a></div>
       <div class="badge"><a href="/tools/invasions" style="color:inherit;text-decoration:none;">Invasions</a></div>
+      <div class="badge"><a href="/tools/assets" style="color:inherit;text-decoration:none;">Asset Uploads</a></div>
       <h1>Live zone and session control surface.</h1>
       <div class="sub">
         This view reflects the in-process MMO runtime. It is intended for basic operations now: gateway health, online sessions, zone populations, and transfer activity.
@@ -1654,6 +1798,7 @@ public sealed class ManagementDashboardHost
           <li><a href="/tools/quests">Quests</a></li>
           <li><a href="/tools/world-events">World Events</a></li>
           <li><a href="/tools/invasions">Invasions</a></li>
+          <li><a href="/tools/assets">Asset Uploads</a></li>
         </ul>
       </article>
     </section>
@@ -1806,9 +1951,178 @@ public sealed class ManagementDashboardHost
       <a class="tool" href="/tools/quests"><strong>Quests</strong><span class="muted">Create quest definitions and simulate progress/claim rewards.</span></a>
       <a class="tool" href="/tools/world-events"><strong>World Events</strong><span class="muted">Schedule event lifecycles, contributions, and reward claims.</span></a>
       <a class="tool" href="/tools/invasions"><strong>Invasions</strong><span class="muted">Run NPC mob invasion waves and player kill-credit rewards.</span></a>
+      <a class="tool" href="/tools/assets"><strong>Asset Uploads</strong><span class="muted">Upload Unity asset bundles via the dedicated Asset API.</span></a>
       <a class="tool" href="/map"><strong>Operations Map</strong><span class="muted">Visualize sessions, movement, and transfers.</span></a>
     </section>
   </div>
+</body>
+</html>
+""";
+
+        return html;
+    }
+
+    private string BuildAssetUploadPage()
+    {
+        var html = """
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Asset Upload Tool</title>
+  <style>
+    body { margin: 0; font-family: "Segoe UI", Inter, system-ui, sans-serif; background: #101d27; color: #ecf6ff; }
+    .wrap { width: min(980px, calc(100vw - 32px)); margin: 0 auto; padding: 24px 0 36px; display: grid; gap: 16px; }
+    .card { background: rgba(14,26,36,0.82); border: 1px solid rgba(138,202,255,0.12); border-radius: 22px; padding: 18px; box-shadow: 0 24px 80px rgba(0,0,0,0.28); }
+    .row { display: flex; gap: 10px; flex-wrap: wrap; align-items: center; }
+    .btn { display: inline-flex; align-items: center; border-radius: 999px; border: 1px solid rgba(138,202,255,0.16); background: rgba(255,255,255,0.04); color: #ecf6ff; padding: 9px 14px; text-decoration: none; cursor: pointer; }
+    .btn.primary { background: linear-gradient(135deg, rgba(85,214,255,0.20), rgba(89,167,255,0.18)); }
+    .field { display: grid; gap: 6px; margin-bottom: 12px; }
+    label { color: #8aa3b8; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.08em; }
+    input, select { padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(138,202,255,0.14); background: rgba(255,255,255,0.03); color: #ecf6ff; }
+    pre { white-space: pre-wrap; word-break: break-word; background: rgba(255,255,255,0.03); border: 1px solid rgba(138,202,255,0.14); border-radius: 12px; padding: 12px; min-height: 120px; }
+    .muted { color: #8aa3b8; line-height: 1.45; }
+  </style>
+</head>
+<body>
+  <div class="wrap">
+    <section class="card">
+      <h1 style="margin:0 0 8px;">Asset Upload Tool</h1>
+      <p class="muted">Upload Unity AssetBundle payloads through <code>/api/assets/upload</code>, which forwards to the dedicated Asset API configured by <code>MMO_ASSET_API_BASE_URL</code>. If the Asset API requires write auth, set <code>MMO_ASSET_API_KEY</code> on this dashboard host.</p>
+      <div class="row">
+        <a class="btn" href="/">Dashboard</a>
+        <a class="btn" href="/tools">Tools Home</a>
+      </div>
+    </section>
+
+    <section class="card">
+      <form id="uploadForm">
+        <div class="field">
+          <label for="assetFile">Asset File</label>
+          <input id="assetFile" name="asset" type="file" required />
+        </div>
+        <div class="field">
+          <label for="sourceName">Source Name (optional)</label>
+          <input id="sourceName" name="sourceName" type="text" placeholder="ui.bundle" />
+        </div>
+        <div class="field">
+          <label for="assetType">Asset Type</label>
+          <select id="assetType" name="assetType">
+            <option value="zone">Zone</option>
+            <option value="music">Music</option>
+            <option value="sound_effect">Sound Effect</option>
+            <option value="particle_effect">Particle Effect</option>
+            <option value="model">Model</option>
+            <option value="ui">UI</option>
+            <option value="texture">Texture</option>
+            <option value="animation">Animation</option>
+            <option value="generic" selected>Generic</option>
+          </select>
+        </div>
+        <div class="field">
+          <label for="bundleName">Bundle Name (optional metadata registration)</label>
+          <input id="bundleName" name="bundleName" type="text" placeholder="zone-eastfield" />
+        </div>
+        <div class="field">
+          <label for="bundleVersion">Bundle Version (optional metadata registration)</label>
+          <input id="bundleVersion" name="bundleVersion" type="text" placeholder="1.0.0" />
+        </div>
+        <div class="field">
+          <label for="platform">Platform (optional metadata registration)</label>
+          <input id="platform" name="platform" type="text" placeholder="windows" />
+        </div>
+        <div class="field">
+          <label for="unityVersion">Unity Version (optional metadata registration)</label>
+          <input id="unityVersion" name="unityVersion" type="text" placeholder="6000.0.27f1" />
+        </div>
+        <div class="field">
+          <label for="notes">Notes (optional)</label>
+          <input id="notes" name="notes" type="text" placeholder="Initial zone art pass" />
+        </div>
+        <button class="btn primary" type="submit">Upload Asset</button>
+      </form>
+    </section>
+
+    <section class="card">
+      <strong>Result</strong>
+      <pre id="output">No upload yet.</pre>
+    </section>
+    <section class="card">
+      <div class="row" style="justify-content:space-between;">
+        <strong>Asset API Overview</strong>
+        <button id="refreshAssets" class="btn" type="button">Refresh</button>
+      </div>
+      <pre id="assetStats">Loading...</pre>
+      <div style="margin-top:10px;"><strong>Zone Asset Bundles</strong></div>
+      <pre id="zoneAssetList">Loading...</pre>
+    </section>
+  </div>
+
+  <script>
+    const form = document.getElementById('uploadForm');
+    const output = document.getElementById('output');
+    const assetStats = document.getElementById('assetStats');
+    const zoneAssetList = document.getElementById('zoneAssetList');
+    const refreshAssets = document.getElementById('refreshAssets');
+
+    form.addEventListener('submit', async (event) => {
+      event.preventDefault();
+      output.textContent = 'Uploading...';
+      try {
+        const body = new FormData(form);
+        const response = await fetch('/api/assets/upload', { method: 'POST', body });
+        const text = await response.text();
+        if (!response.ok) {
+          output.textContent = `Upload failed (${response.status}): ${text}`;
+          return;
+        }
+
+        try {
+          const json = JSON.parse(text);
+          output.textContent = JSON.stringify(json, null, 2);
+        } catch {
+          output.textContent = text;
+        }
+      } catch (error) {
+        output.textContent = 'Upload error: ' + (error && error.message ? error.message : String(error));
+      }
+    });
+
+    async function loadAssetOverview() {
+      try {
+        const [statsResponse, zoneResponse] = await Promise.all([
+          fetch('/api/assets/stats', { cache: 'no-store' }),
+          fetch('/api/assets/zone-assets', { cache: 'no-store' })
+        ]);
+
+        const statsText = await statsResponse.text();
+        const zoneText = await zoneResponse.text();
+
+        assetStats.textContent = statsResponse.ok
+          ? JSON.stringify(JSON.parse(statsText), null, 2)
+          : `Stats load failed (${statsResponse.status}): ${statsText}`;
+
+        if (zoneResponse.ok) {
+          const zonePayload = JSON.parse(zoneText);
+          const zoneRows = Array.isArray(zonePayload) ? zonePayload : [];
+          const names = [...new Set(zoneRows.map(entry => entry.bundleName).filter(Boolean))];
+          zoneAssetList.textContent = names.length === 0
+            ? 'No zone assets found.'
+            : names.join('\n');
+        } else {
+          zoneAssetList.textContent = `Zone asset load failed (${zoneResponse.status}): ${zoneText}`;
+        }
+      } catch (error) {
+        const message = error && error.message ? error.message : String(error);
+        assetStats.textContent = `Overview load failed: ${message}`;
+        zoneAssetList.textContent = `Overview load failed: ${message}`;
+      }
+    }
+
+    refreshAssets.addEventListener('click', loadAssetOverview);
+    loadAssetOverview();
+  </script>
 </body>
 </html>
 """;
@@ -1838,7 +2152,7 @@ public sealed class ManagementDashboardHost
     .field { display: grid; gap: 6px; }
     .field.full { grid-column: 1 / -1; }
     label { color: #8aa3b8; font-size: 0.82rem; text-transform: uppercase; letter-spacing: 0.08em; }
-    input { padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(138,202,255,0.14); background: rgba(255,255,255,0.03); color: #ecf6ff; }
+    input, select { padding: 10px 12px; border-radius: 12px; border: 1px solid rgba(138,202,255,0.14); background: rgba(255,255,255,0.03); color: #ecf6ff; }
     table { width: 100%; border-collapse: collapse; margin-top: 12px; font-size: 0.93rem; }
     th, td { text-align: left; padding: 10px 8px; border-bottom: 1px solid rgba(138,202,255,0.08); vertical-align: top; }
     th { color: #8aa3b8; font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; }
@@ -1901,6 +2215,7 @@ public sealed class ManagementDashboardHost
     const tableBody = document.getElementById('tableBody');
     let rows = [];
     let selectedIndex = -1;
+    let zoneAssetOptions = [];
 
     function fieldConfig() {
       switch (section) {
@@ -1933,6 +2248,7 @@ public sealed class ManagementDashboardHost
         case 'zones': return [
           { key: 'zoneId', label: 'Zone Id', type: 'number' },
           { key: 'name', label: 'Name', type: 'text' },
+          { key: 'zoneAssetBundle', label: 'Zone Asset Bundle', type: 'select', optionsKey: 'zoneAssets' },
           { key: 'minX', label: 'Min X', type: 'number', step: '0.1' },
           { key: 'maxX', label: 'Max X', type: 'number', step: '0.1' },
           { key: 'minZ', label: 'Min Z', type: 'number', step: '0.1' },
@@ -1945,7 +2261,11 @@ public sealed class ManagementDashboardHost
     function createEmptyRow() {
       const row = {};
       for (const field of fieldConfig()) {
-        row[field.key] = field.type === 'number' ? 0 : '';
+        if (field.type === 'number') {
+          row[field.key] = 0;
+        } else {
+          row[field.key] = '';
+        }
       }
       return row;
     }
@@ -1954,9 +2274,24 @@ public sealed class ManagementDashboardHost
       formFields.innerHTML = fieldConfig().map(field => `
         <div class="field ${field.type === 'text' && field.key === 'name' ? 'full' : ''}">
           <label for="field_${field.key}">${field.label}</label>
-          <input id="field_${field.key}" type="${field.type}" ${field.step ? `step="${field.step}"` : ''} value="${row[field.key] ?? ''}" />
+          ${field.type === 'select'
+            ? `<select id="field_${field.key}">${renderSelectOptions(field, row[field.key])}</select>`
+            : `<input id="field_${field.key}" type="${field.type}" ${field.step ? `step="${field.step}"` : ''} value="${row[field.key] ?? ''}" />`}
         </div>
       `).join('');
+    }
+
+    function renderSelectOptions(field, selectedValue) {
+      if (field.optionsKey !== 'zoneAssets') {
+        return `<option value="">None</option>`;
+      }
+
+      const options = [...zoneAssetOptions];
+      if (selectedValue && !options.includes(selectedValue)) {
+        options.unshift(selectedValue);
+      }
+
+      return [`<option value="">None</option>`, ...options.map(value => `<option value="${value}" ${value === selectedValue ? 'selected' : ''}>${value}</option>`)].join('');
     }
 
     function currentRowFromForm() {
@@ -1988,7 +2323,28 @@ public sealed class ManagementDashboardHost
       });
     }
 
+    async function loadZoneAssetOptions() {
+      if (section !== 'zones') {
+        return;
+      }
+
+      try {
+        const response = await fetch('/api/assets/zone-assets', { cache: 'no-store' });
+        if (!response.ok) {
+          zoneAssetOptions = [];
+          return;
+        }
+
+        const payload = await response.json();
+        const list = Array.isArray(payload) ? payload : [];
+        zoneAssetOptions = [...new Set(list.map(entry => entry.bundleName).filter(Boolean))].sort((a, b) => a.localeCompare(b));
+      } catch {
+        zoneAssetOptions = [];
+      }
+    }
+
     async function loadRows() {
+      await loadZoneAssetOptions();
       const response = await fetch('/api/gameplay-definitions', { cache: 'no-store' });
       const snapshot = await response.json();
       rows = [...(snapshot[section] || [])];
@@ -2074,7 +2430,7 @@ public sealed class ManagementDashboardHost
             "skills" => """{"id":"carpentry","name":"Carpentry","maxValue":100}""",
             "resources" => """{"id":"hemp","name":"Hemp Plant","itemId":"fiber","baseYield":1}""",
             "nodes" => """{"id":"hemp-1","zoneId":1,"resourceId":"hemp","positionX":18,"positionY":0,"positionZ":63,"respawnSeconds":12}""",
-            "zones" => """{"zoneId":3,"name":"EastField","minX":200,"maxX":300,"minZ":0,"maxZ":100}""",
+            "zones" => """{"zoneId":3,"name":"EastField","zoneAssetBundle":"zone-eastfield","minX":200,"maxX":300,"minZ":0,"maxZ":100}""",
             _ => "{}"
         };
 

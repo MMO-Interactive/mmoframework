@@ -293,7 +293,11 @@ public sealed class ZoneStateBatchUpdateMessage : TcpMessage
 public enum GameplayCommandKind : byte
 {
     Gather = 1,
-    InspectInventory = 2
+    InspectInventory = 2,
+    CastSpell = 3,
+    Farming = 4,
+    Tame = 5,
+    Craft = 6
 }
 
 public sealed class GameplayCommandMessage : TcpMessage
