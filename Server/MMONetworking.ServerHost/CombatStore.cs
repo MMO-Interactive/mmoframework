@@ -197,72 +197,22 @@ public sealed class CombatStore
     {
         using var connection = new SqliteConnection(_connectionString);
         connection.Open();
-        using (var command = connection.CreateCommand())
+        if (!TableExists(connection, "combatant_state"))
         {
-            command.CommandText =
-                """
-                CREATE TABLE IF NOT EXISTS combatant_state (
-                    account_id TEXT PRIMARY KEY,
-                    character_id INTEGER NULL,
-                    hp INTEGER NOT NULL,
-                    max_hp INTEGER NOT NULL,
-                    stamina INTEGER NOT NULL,
-                    deaths INTEGER NOT NULL,
-                    updated_at_utc TEXT NOT NULL
-                );
-                """;
-            command.ExecuteNonQuery();
+            CreateCharacterScopedCombatantTable(connection, "combatant_state");
+        }
+        else if (ColumnExists(connection, "combatant_state", "account_id"))
+        {
+            MigrateLegacyCombatants(connection);
         }
 
-        using (var command = connection.CreateCommand())
+        if (!TableExists(connection, "combat_actions"))
         {
-            command.CommandText =
-                """
-                CREATE TABLE IF NOT EXISTS combat_actions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    action_type TEXT NOT NULL,
-                    attacker_account_id TEXT,
-                    target_account_id TEXT,
-                    attacker_character_id INTEGER NULL,
-                    target_character_id INTEGER NULL,
-                    damage INTEGER NOT NULL,
-                    remaining_hp INTEGER NOT NULL,
-                    notes TEXT,
-                    created_at_utc TEXT NOT NULL
-                );
-                """;
-            command.ExecuteNonQuery();
+            CreateCharacterScopedCombatActionTable(connection, "combat_actions");
         }
-
-        using (var migrateState = connection.CreateCommand())
+        else if (ColumnExists(connection, "combat_actions", "attacker_account_id") || ColumnExists(connection, "combat_actions", "target_account_id"))
         {
-            migrateState.CommandText =
-                """
-                UPDATE combatant_state
-                SET character_id = (
-                    SELECT primary_character_id
-                    FROM accounts
-                    WHERE accounts.account_id = combatant_state.account_id
-                )
-                WHERE character_id IS NULL;
-                """;
-            migrateState.ExecuteNonQuery();
-        }
-
-        using (var migrateActions = connection.CreateCommand())
-        {
-            migrateActions.CommandText =
-                """
-                UPDATE combat_actions
-                SET attacker_character_id = (
-                        SELECT primary_character_id FROM accounts WHERE accounts.account_id = combat_actions.attacker_account_id
-                    ),
-                    target_character_id = (
-                        SELECT primary_character_id FROM accounts WHERE accounts.account_id = combat_actions.target_account_id
-                    )
-                WHERE attacker_character_id IS NULL OR target_character_id IS NULL;
-                """;
-            migrateActions.ExecuteNonQuery();
+            MigrateLegacyActions(connection);
         }
 
         using (var stateIndex = connection.CreateCommand())
@@ -270,6 +220,161 @@ public sealed class CombatStore
             stateIndex.CommandText = "CREATE UNIQUE INDEX IF NOT EXISTS ix_combatant_state_character ON combatant_state(character_id);";
             stateIndex.ExecuteNonQuery();
         }
+    }
+
+    private static void MigrateLegacyCombatants(SqliteConnection connection)
+    {
+        CreateCharacterScopedCombatantTable(connection, "combatant_state_v2");
+
+        using (var migrate = connection.CreateCommand())
+        {
+            migrate.CommandText =
+                """
+                INSERT OR REPLACE INTO combatant_state_v2(character_id, hp, max_hp, stamina, deaths, updated_at_utc)
+                SELECT resolved.character_id, resolved.hp, resolved.max_hp, resolved.stamina, resolved.deaths, resolved.updated_at_utc
+                FROM (
+                    SELECT
+                        CASE
+                            WHEN combatant_state.character_id IS NOT NULL THEN combatant_state.character_id
+                            ELSE (
+                                SELECT primary_character_id
+                                FROM accounts
+                                WHERE accounts.account_id = combatant_state.account_id
+                            )
+                        END AS character_id,
+                        combatant_state.hp,
+                        combatant_state.max_hp,
+                        combatant_state.stamina,
+                        combatant_state.deaths,
+                        combatant_state.updated_at_utc
+                    FROM combatant_state
+                ) AS resolved
+                WHERE resolved.character_id IS NOT NULL;
+                """;
+            migrate.ExecuteNonQuery();
+        }
+
+        using (var dropLegacy = connection.CreateCommand())
+        {
+            dropLegacy.CommandText = "DROP TABLE combatant_state;";
+            dropLegacy.ExecuteNonQuery();
+        }
+
+        using (var rename = connection.CreateCommand())
+        {
+            rename.CommandText = "ALTER TABLE combatant_state_v2 RENAME TO combatant_state;";
+            rename.ExecuteNonQuery();
+        }
+    }
+
+    private static void MigrateLegacyActions(SqliteConnection connection)
+    {
+        CreateCharacterScopedCombatActionTable(connection, "combat_actions_v2");
+
+        using (var migrate = connection.CreateCommand())
+        {
+            migrate.CommandText =
+                """
+                INSERT INTO combat_actions_v2(id, action_type, attacker_character_id, target_character_id, damage, remaining_hp, notes, created_at_utc)
+                SELECT
+                    combat_actions.id,
+                    combat_actions.action_type,
+                    CASE
+                        WHEN combat_actions.attacker_character_id IS NOT NULL THEN combat_actions.attacker_character_id
+                        ELSE (
+                            SELECT primary_character_id
+                            FROM accounts
+                            WHERE accounts.account_id = combat_actions.attacker_account_id
+                        )
+                    END,
+                    CASE
+                        WHEN combat_actions.target_character_id IS NOT NULL THEN combat_actions.target_character_id
+                        ELSE (
+                            SELECT primary_character_id
+                            FROM accounts
+                            WHERE accounts.account_id = combat_actions.target_account_id
+                        )
+                    END,
+                    combat_actions.damage,
+                    combat_actions.remaining_hp,
+                    combat_actions.notes,
+                    combat_actions.created_at_utc
+                FROM combat_actions;
+                """;
+            migrate.ExecuteNonQuery();
+        }
+
+        using (var dropLegacy = connection.CreateCommand())
+        {
+            dropLegacy.CommandText = "DROP TABLE combat_actions;";
+            dropLegacy.ExecuteNonQuery();
+        }
+
+        using (var rename = connection.CreateCommand())
+        {
+            rename.CommandText = "ALTER TABLE combat_actions_v2 RENAME TO combat_actions;";
+            rename.ExecuteNonQuery();
+        }
+    }
+
+    private static void CreateCharacterScopedCombatantTable(SqliteConnection connection, string tableName)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            $"""
+            CREATE TABLE IF NOT EXISTS {tableName} (
+                character_id INTEGER NOT NULL PRIMARY KEY,
+                hp INTEGER NOT NULL,
+                max_hp INTEGER NOT NULL,
+                stamina INTEGER NOT NULL,
+                deaths INTEGER NOT NULL,
+                updated_at_utc TEXT NOT NULL
+            );
+            """;
+        command.ExecuteNonQuery();
+    }
+
+    private static void CreateCharacterScopedCombatActionTable(SqliteConnection connection, string tableName)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            $"""
+            CREATE TABLE IF NOT EXISTS {tableName} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                action_type TEXT NOT NULL,
+                attacker_character_id INTEGER NOT NULL,
+                target_character_id INTEGER NOT NULL,
+                damage INTEGER NOT NULL,
+                remaining_hp INTEGER NOT NULL,
+                notes TEXT,
+                created_at_utc TEXT NOT NULL
+            );
+            """;
+        command.ExecuteNonQuery();
+    }
+
+    private static bool TableExists(SqliteConnection connection, string tableName)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = $name LIMIT 1;";
+        command.Parameters.AddWithValue("$name", tableName);
+        return command.ExecuteScalar() != null;
+    }
+
+    private static bool ColumnExists(SqliteConnection connection, string tableName, string columnName)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"PRAGMA table_info({tableName});";
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            if (string.Equals(reader.GetString(1), columnName, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 
     private sealed class MutableCombatant

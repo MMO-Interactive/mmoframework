@@ -38,7 +38,24 @@ public readonly record struct MobSnapshot(
     string MobTypeId,
     NetworkVector3 Position,
     NetworkVector3 Velocity,
-    string State);
+    string State,
+    int HitPoints,
+    int MaxHitPoints);
+
+public readonly record struct NpcServiceSnapshot(
+    string ActionId,
+    string Label,
+    string UiHint);
+
+public readonly record struct NpcSnapshot(
+    string NpcId,
+    string NpcTypeId,
+    string DisplayName,
+    NetworkVector3 Position,
+    string PrimaryRole,
+    string[] Services,
+    string GreetingText,
+    NpcServiceSnapshot[] ServiceOptions);
 
 public readonly record struct ZonePlayerStateUpdate(
     Guid SessionId,
@@ -55,8 +72,14 @@ public readonly record struct ZoneDefinition(
     float MinX,
     float MaxX,
     float MinZ,
-    float MaxZ)
+    float MaxZ,
+    string AssetBundleName = "")
 {
+    public const float StandardZoneSizeMeters = 2000f;
+
+    public int GridX => (int)MathF.Round(MinX / StandardZoneSizeMeters);
+    public int GridZ => (int)MathF.Round(MinZ / StandardZoneSizeMeters);
+
     public bool Contains(NetworkVector3 position)
         => position.X >= MinX && position.X < MaxX && position.Z >= MinZ && position.Z < MaxZ;
 

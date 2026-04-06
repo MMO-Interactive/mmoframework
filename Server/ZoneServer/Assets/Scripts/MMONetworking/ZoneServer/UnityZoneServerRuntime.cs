@@ -32,17 +32,17 @@ public sealed class UnityZoneServerRuntime : IDisposable
     private readonly CancellationTokenSource _shutdown = new();
     private readonly Dictionary<string, ResourceNode> _resourceNodes;
     private readonly Dictionary<string, ZoneMob> _mobs;
+    private readonly NpcState[] _npcs;
     private readonly Dictionary<string, FarmPlot> _farmPlots = new Dictionary<string, FarmPlot>(StringComparer.OrdinalIgnoreCase);
     private readonly object _resourceSync = new();
     private readonly object _mobSync = new();
     private readonly object _farmSync = new();
-    private readonly object _mobSync = new();
     private readonly System.Random _random = new System.Random();
     private int _mobReportInFlight;
     private int _stateReportInFlight;
     private uint _tick;
 
-    public UnityZoneServerRuntime(ZoneDefinition definition, string controlHost, int controlPort, float prewarmMargin, int mobCount)
+    public UnityZoneServerRuntime(ZoneDefinition definition, string controlHost, int controlPort, float prewarmMargin, int mobCount, UnityZoneServerBootstrap.NpcDefinitionData[] npcDefinitions, UnityZoneServerBootstrap.MobSpawnDefinitionData[] mobSpawnDefinitions)
     {
         _definition = definition;
         _controlHost = controlHost;
@@ -51,7 +51,8 @@ public sealed class UnityZoneServerRuntime : IDisposable
         _tcpListener = new TcpListener(IPAddress.Any, definition.TcpPort);
         _udpClient = new UdpClient(definition.UdpPort);
         _resourceNodes = CreateDefaultResourceNodes(definition);
-        _mobs = CreateDefaultMobs(definition, mobCount);
+        _mobs = CreateMobs(definition, mobCount, mobSpawnDefinitions);
+        _npcs = CreateNpcs(definition, npcDefinitions);
     }
 
     public int ActivePlayers => _players.Count;
@@ -145,6 +146,14 @@ public sealed class UnityZoneServerRuntime : IDisposable
                     {
                         player.LastTcpSeenUtc = DateTimeOffset.UtcNow;
                         await SendToPlayerAsync(player, new HeartbeatMessage(heartbeat.ServerTicks), cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    var gameplayServiceRequest = message as GameplayServiceRequestMessage;
+                    if (gameplayServiceRequest != null)
+                    {
+                        var gameplayServiceResponse = await RequestGameplayServiceAsync(gameplayServiceRequest, cancellationToken).ConfigureAwait(false);
+                        await SendToPlayerAsync(player, gameplayServiceResponse, cancellationToken).ConfigureAwait(false);
                         continue;
                     }
 
@@ -432,6 +441,9 @@ public sealed class UnityZoneServerRuntime : IDisposable
             case GameplayCommandKind.Craft:
                 await HandleCraftAsync(player, command, cancellationToken).ConfigureAwait(false);
                 return;
+            case GameplayCommandKind.Attack:
+                await HandleAttackAsync(player, command, cancellationToken).ConfigureAwait(false);
+                return;
             case GameplayCommandKind.InspectInventory:
                 await SendToPlayerAsync(
                     player,
@@ -521,6 +533,15 @@ public sealed class UnityZoneServerRuntime : IDisposable
             player.IncreaseSkill(skillKind, 1);
         }
 
+        await ReportGameplayRewardAsync(
+            player.SessionId,
+            node.ItemId,
+            amount,
+            200,
+            ResolveSkillTrackId(skillKind),
+            Math.Max(1, amount * 2),
+            cancellationToken).ConfigureAwait(false);
+
         var gatherCooldownMultiplier = player.GetGatherCooldownMultiplier(DateTimeOffset.UtcNow);
         var cooldownMs = Mathf.Clamp(Mathf.RoundToInt(750f * gatherCooldownMultiplier), 250, 3000);
         player.NextGatherAllowedUtc = DateTimeOffset.UtcNow.AddMilliseconds(cooldownMs);
@@ -536,6 +557,7 @@ public sealed class UnityZoneServerRuntime : IDisposable
                 player.GetItemCount(node.ItemId),
                 updatedSkill),
             cancellationToken).ConfigureAwait(false);
+        await PushGameplayStateAsync(player, cancellationToken).ConfigureAwait(false);
     }
 
     private async Task HandleFarmingAsync(ZonePlayer player, GameplayCommandMessage command, CancellationToken cancellationToken)
@@ -706,6 +728,73 @@ public sealed class UnityZoneServerRuntime : IDisposable
             cancellationToken).ConfigureAwait(false);
     }
 
+    private async Task HandleAttackAsync(ZonePlayer player, GameplayCommandMessage command, CancellationToken cancellationToken)
+    {
+        var targetMobId = (command.TargetId ?? string.Empty).Trim();
+        if (string.IsNullOrWhiteSpace(targetMobId))
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Target mob id is required for attack.", string.Empty, 0, player.CraftingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (DateTimeOffset.UtcNow < player.NextAttackAllowedUtc)
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Attack on cooldown.", string.Empty, 0, player.CraftingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        ZoneMob mob;
+        lock (_mobSync)
+        {
+            _mobs.TryGetValue(targetMobId, out mob);
+        }
+
+        if (mob == null)
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Unknown mob.", string.Empty, 0, player.CraftingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (mob.RespawnAvailableUtc.HasValue)
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "That creature is already defeated.", string.Empty, 0, player.CraftingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (DistanceSquared(player.Position, mob.Position) > 16f)
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Too far away to attack.", string.Empty, 0, player.CraftingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        player.NextAttackAllowedUtc = DateTimeOffset.UtcNow.AddSeconds(0.85);
+
+        var damage = Math.Max(4, 8 + (player.CraftingSkill / 4));
+        await ResolveMobDamageAsync(
+            player,
+            command,
+            targetMobId,
+            damage,
+            "Hit ",
+            "Defeated ",
+            cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task HandleCraftAsync(ZonePlayer player, GameplayCommandMessage command, CancellationToken cancellationToken)
     {
         var recipeId = (command.TargetId ?? string.Empty).Trim().ToLowerInvariant();
@@ -762,7 +851,12 @@ public sealed class UnityZoneServerRuntime : IDisposable
     private async Task HandleCastSpellAsync(ZonePlayer player, GameplayCommandMessage command, CancellationToken cancellationToken)
     {
         var now = DateTimeOffset.UtcNow;
-        var spellId = (command.TargetId ?? string.Empty).Trim().ToLowerInvariant();
+        var targetPayload = (command.TargetId ?? string.Empty).Trim();
+        var splitIndex = targetPayload.IndexOf(':');
+        var spellId = (splitIndex >= 0 ? targetPayload[..splitIndex] : targetPayload).Trim().ToLowerInvariant();
+        var targetId = splitIndex >= 0 && splitIndex < targetPayload.Length - 1
+            ? targetPayload[(splitIndex + 1)..].Trim()
+            : string.Empty;
         if (string.IsNullOrWhiteSpace(spellId))
         {
             await SendToPlayerAsync(
@@ -800,6 +894,50 @@ public sealed class UnityZoneServerRuntime : IDisposable
             return;
         }
 
+        if (spell.RequiresTarget && string.IsNullOrWhiteSpace(targetId))
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, spell.DisplayName + " requires a target.", string.Empty, 0, player.CraftingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (spell.RequiresTarget)
+        {
+            if (!TryGetActiveMob(targetId, out var targetMob))
+            {
+                await SendToPlayerAsync(
+                    player,
+                    new GameplayResultMessage(command.SessionId, command.CommandId, false, "Unknown mob target.", string.Empty, 0, player.CraftingSkill),
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            if (DistanceSquared(player.Position, targetMob.Position) > spell.Range * spell.Range)
+            {
+                await SendToPlayerAsync(
+                    player,
+                    new GameplayResultMessage(command.SessionId, command.CommandId, false, "Target is out of spell range.", string.Empty, 0, player.CraftingSkill),
+                    cancellationToken).ConfigureAwait(false);
+                return;
+            }
+
+            player.Mana -= spell.ManaCost;
+            player.NextSpellAllowedUtc = now.AddSeconds(spell.CooldownSeconds);
+
+            player.CraftingSkill = Math.Min(100, player.CraftingSkill + 1);
+            await ResolveMobDamageAsync(
+                player,
+                command,
+                targetId,
+                spell.BaseDamage + Math.Max(0, player.CraftingSkill / 2),
+                spell.DisplayName + " scorched ",
+                spell.DisplayName + " incinerated ",
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
         player.Mana -= spell.ManaCost;
         player.NextSpellAllowedUtc = now.AddSeconds(spell.CooldownSeconds);
         player.ActiveEffects.RemoveAll(effect => effect.EffectType == spell.EffectType);
@@ -816,7 +954,96 @@ public sealed class UnityZoneServerRuntime : IDisposable
                 string.Empty,
                 0,
                 player.CraftingSkill),
+                cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task ResolveMobDamageAsync(
+        ZonePlayer player,
+        GameplayCommandMessage command,
+        string targetMobId,
+        int damage,
+        string hitPrefix,
+        string defeatedPrefix,
+        CancellationToken cancellationToken)
+    {
+        var defeated = false;
+        var remainingHp = 0;
+        ZoneMob mob;
+        lock (_mobSync)
+        {
+            if (!_mobs.TryGetValue(targetMobId, out mob))
+            {
+                mob = null;
+            }
+            else
+            {
+                mob.HitPoints = Math.Max(0, mob.HitPoints - damage);
+                mob.State = mob.HitPoints <= 0 ? "Defeated" : "Aggro";
+                mob.OwnerPlayerId = player.PlayerId;
+                remainingHp = mob.HitPoints;
+                if (mob.HitPoints <= 0)
+                {
+                    mob.RespawnAvailableUtc = DateTimeOffset.UtcNow.AddSeconds(mob.MobTypeId == "wolf" ? 10 : 12);
+                    mob.Velocity = NetworkVector3.Zero;
+                    defeated = true;
+                }
+            }
+        }
+
+        if (mob == null)
+        {
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(command.SessionId, command.CommandId, false, "Unknown mob.", string.Empty, 0, player.CraftingSkill),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        if (defeated)
+        {
+            var rewardItemId = mob.MobTypeId == "wolf" ? "hide" : "meat";
+            player.AddItem(rewardItemId, 1);
+            await ReportGameplayRewardAsync(player.SessionId, rewardItemId, 1, 200, "combat", 12, cancellationToken).ConfigureAwait(false);
+            await SendToPlayerAsync(
+                player,
+                new GameplayResultMessage(
+                    command.SessionId,
+                    command.CommandId,
+                    true,
+                    defeatedPrefix + mob.MobTypeId + " for " + damage + " damage.",
+                    rewardItemId,
+                    player.GetItemCount(rewardItemId),
+                    player.CraftingSkill),
+                cancellationToken).ConfigureAwait(false);
+            await PushGameplayStateAsync(player, cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        await SendToPlayerAsync(
+            player,
+            new GameplayResultMessage(
+                command.SessionId,
+                command.CommandId,
+                true,
+                hitPrefix + mob.MobTypeId + " for " + damage + " damage (" + remainingHp + " hp left).",
+                string.Empty,
+                0,
+                player.CraftingSkill),
             cancellationToken).ConfigureAwait(false);
+    }
+
+    private bool TryGetActiveMob(string mobId, out ZoneMob mob)
+    {
+        lock (_mobSync)
+        {
+            if (_mobs.TryGetValue(mobId, out mob) && !mob.RespawnAvailableUtc.HasValue)
+            {
+                return true;
+            }
+        }
+
+        mob = null;
+        return false;
     }
 
     private void UpdateMagicEffects(float deltaSeconds)
@@ -935,6 +1162,24 @@ public sealed class UnityZoneServerRuntime : IDisposable
             var nowUtc = DateTimeOffset.UtcNow;
             foreach (var mob in _mobs.Values)
             {
+                if (mob.RespawnAvailableUtc.HasValue)
+                {
+                    if (nowUtc < mob.RespawnAvailableUtc.Value)
+                    {
+                        mob.State = "Defeated";
+                        mob.Velocity = NetworkVector3.Zero;
+                        continue;
+                    }
+
+                    mob.RespawnAvailableUtc = null;
+                    mob.HitPoints = mob.MaxHitPoints;
+                    mob.Position = mob.SpawnPosition;
+                    mob.TargetPosition = mob.SpawnPosition;
+                    mob.OwnerPlayerId = null;
+                    mob.State = "Idle";
+                    mob.NextDecisionUtc = nowUtc.AddSeconds(1.5);
+                }
+
                 if (mob.OwnerPlayerId.HasValue && TryGetPlayerById(mob.OwnerPlayerId.Value, out var owner))
                 {
                     mob.TargetPosition = _definition.Clamp(owner.Position);
@@ -1009,7 +1254,7 @@ public sealed class UnityZoneServerRuntime : IDisposable
         {
             return _mobs.Values
                 .OrderBy(mob => mob.MobId, StringComparer.Ordinal)
-                .Select(mob => new MobSnapshot(mob.MobId, mob.MobTypeId, mob.Position, mob.Velocity, mob.State))
+                .Select(mob => new MobSnapshot(mob.MobId, mob.MobTypeId, mob.Position, mob.Velocity, mob.State, mob.HitPoints, mob.MaxHitPoints))
                 .ToArray();
         }
     }
@@ -1075,17 +1320,42 @@ public sealed class UnityZoneServerRuntime : IDisposable
                 mob.MobTypeId,
                 mob.Position,
                 mob.Velocity,
-                mob.State));
+                mob.State,
+                mob.HitPoints,
+                mob.MaxHitPoints));
         }
 
         visibleMobs.Sort((left, right) => string.CompareOrdinal(left.MobId, right.MobId));
+
+        var visibleNpcs = new List<NpcSnapshot>(4);
+        for (var i = 0; i < _npcs.Length; i++)
+        {
+            var npc = _npcs[i];
+            if (!IsWithinAoi(recipient.Position, npc.Position))
+            {
+                continue;
+            }
+
+            visibleNpcs.Add(new NpcSnapshot(
+                npc.NpcId,
+                npc.NpcTypeId,
+                npc.DisplayName,
+                npc.Position,
+                npc.PrimaryRole,
+                npc.Services,
+                npc.GreetingText,
+                npc.ServiceOptions));
+        }
+
+        visibleNpcs.Sort((left, right) => string.CompareOrdinal(left.NpcId, right.NpcId));
 
         return new WorldSnapshotMessage(
             _definition.ZoneId,
             _tick,
             playerSnapshots.ToArray(),
             visibleNodes.ToArray(),
-            visibleMobs.ToArray());
+            visibleMobs.ToArray(),
+            visibleNpcs.ToArray());
     }
 
     private async Task ReportMobsAsync(CancellationToken cancellationToken)
@@ -1112,6 +1382,16 @@ public sealed class UnityZoneServerRuntime : IDisposable
         }
     }
 
+    private static Dictionary<string, ZoneMob> CreateMobs(ZoneDefinition definition, int mobCount, UnityZoneServerBootstrap.MobSpawnDefinitionData[] mobSpawnDefinitions)
+    {
+        if (mobSpawnDefinitions != null && mobSpawnDefinitions.Length > 0)
+        {
+            return CreateAuthoredMobs(definition, mobSpawnDefinitions);
+        }
+
+        return CreateDefaultMobs(definition, mobCount);
+    }
+
     private static Dictionary<string, ZoneMob> CreateDefaultMobs(ZoneDefinition definition, int mobCount)
     {
         var mobs = new Dictionary<string, ZoneMob>(StringComparer.OrdinalIgnoreCase);
@@ -1134,15 +1414,174 @@ public sealed class UnityZoneServerRuntime : IDisposable
             var mobTypeId = index % 2 == 0 ? "wolf" : "boar";
             var speed = mobTypeId == "wolf" ? 1.6f : 1.25f;
             var wanderRadius = mobTypeId == "wolf" ? 10f : 8f;
+            var maxHitPoints = mobTypeId == "wolf" ? 40 : 55;
             var spawn = new NetworkVector3(
                 definition.MinX + 6f + (column * spacingX) + (spacingX * 0.5f),
                 0f,
                 definition.MinZ + 6f + (row * spacingZ) + (spacingZ * 0.5f));
             var mobId = mobTypeId + "-" + definition.ZoneId + "-" + (index + 1);
-            mobs[mobId] = new ZoneMob(mobId, mobTypeId, definition.Clamp(spawn), speed, wanderRadius);
+            mobs[mobId] = new ZoneMob(mobId, mobTypeId, definition.Clamp(spawn), speed, wanderRadius, maxHitPoints);
         }
 
         return mobs;
+    }
+
+    private static Dictionary<string, ZoneMob> CreateAuthoredMobs(ZoneDefinition definition, UnityZoneServerBootstrap.MobSpawnDefinitionData[] mobSpawnDefinitions)
+    {
+        var mobs = new Dictionary<string, ZoneMob>(StringComparer.OrdinalIgnoreCase);
+        for (var spawnIndex = 0; spawnIndex < mobSpawnDefinitions.Length; spawnIndex++)
+        {
+            var spawn = mobSpawnDefinitions[spawnIndex];
+            if (spawn == null || spawn.zoneId != definition.ZoneId)
+            {
+                continue;
+            }
+
+            var mobTypeId = string.IsNullOrWhiteSpace(spawn.mobTypeId) ? "wolf" : spawn.mobTypeId.Trim().ToLowerInvariant();
+            var speed = mobTypeId == "wolf" ? 1.6f : 1.25f;
+            var wanderRadius = Mathf.Max(0.5f, spawn.roamRadius <= 0f ? spawn.radius : spawn.roamRadius);
+            var maxHitPoints = mobTypeId == "wolf" ? 40 : 55;
+            var count = Mathf.Max(1, spawn.count);
+            var clusterRadius = Mathf.Max(0.5f, spawn.radius);
+            for (var index = 0; index < count; index++)
+            {
+                var angle = index * (Mathf.PI * 2f / Mathf.Max(count, 1));
+                var distance = count == 1 ? 0f : Mathf.Min(clusterRadius, 1.5f + (index % 3));
+                var position = new NetworkVector3(
+                    spawn.positionX + Mathf.Cos(angle) * distance,
+                    spawn.positionY,
+                    spawn.positionZ + Mathf.Sin(angle) * distance);
+                var mobId = mobTypeId + "-" + definition.ZoneId + "-" + spawn.spawnId + "-" + (index + 1);
+                mobs[mobId] = new ZoneMob(mobId, mobTypeId, definition.Clamp(position), speed, wanderRadius, maxHitPoints);
+            }
+        }
+
+        return mobs;
+    }
+
+    private static NpcState[] CreateNpcs(ZoneDefinition definition, UnityZoneServerBootstrap.NpcDefinitionData[] npcDefinitions)
+    {
+        if (npcDefinitions != null && npcDefinitions.Length > 0)
+        {
+            var authored = new List<NpcState>(npcDefinitions.Length);
+            for (var i = 0; i < npcDefinitions.Length; i++)
+            {
+                var npc = npcDefinitions[i];
+                if (npc == null || npc.zoneId != definition.ZoneId)
+                {
+                    continue;
+                }
+
+                authored.Add(new NpcState(
+                    npc.npcId,
+                    npc.npcTypeId,
+                    npc.displayName,
+                    new NetworkVector3(npc.positionX, npc.positionY, npc.positionZ),
+                    npc.primaryRole,
+                    npc.services ?? Array.Empty<string>(),
+                    npc.greetingText ?? string.Empty,
+                    ToServiceSnapshots(npc.serviceOptions, npc.services, npc.primaryRole)));
+            }
+
+            if (authored.Count > 0)
+            {
+                return authored.ToArray();
+            }
+        }
+
+        var midZ = (definition.MinZ + definition.MaxZ) * 0.5f;
+        return new[]
+        {
+            new NpcState(
+                "merchant-" + definition.ZoneId,
+                "merchant",
+                "Quartermaster Rowan",
+                new NetworkVector3(definition.MinX + 22f, 0f, midZ - 3f),
+                "shop",
+                new[] { "shop", "crafting" },
+                "Supplies for the road, tools for the trade, and a fair barter if your pack is worth opening.",
+                BuildDefaultServiceOptions("shop", "crafting")),
+            new NpcState(
+                "questgiver-" + definition.ZoneId,
+                "quest_giver",
+                "Warden Elira",
+                new NetworkVector3(definition.MinX + 28f, 0f, midZ + 3f),
+                "quest",
+                new[] { "quests" },
+                "Every frontier needs hands willing to work. If you want purpose, I have tasks that matter.",
+                BuildDefaultServiceOptions("quests")),
+            new NpcState(
+                "trainer-" + definition.ZoneId,
+                "trainer",
+                "Master Toren",
+                new NetworkVector3(definition.MinX + 34f, 0f, midZ),
+                "trainer",
+                new[] { "training", "progression" },
+                "Skill is earned, not granted. Show me what you've practiced, and I'll show you where to sharpen it next.",
+                BuildDefaultServiceOptions("training"))
+        };
+    }
+
+    private static NpcServiceSnapshot[] ToServiceSnapshots(UnityZoneServerBootstrap.NpcServiceDefinitionData[] serviceOptions, string[] services, string primaryRole)
+    {
+        if (serviceOptions != null && serviceOptions.Length > 0)
+        {
+            var authored = new List<NpcServiceSnapshot>(serviceOptions.Length);
+            for (var index = 0; index < serviceOptions.Length; index++)
+            {
+                var option = serviceOptions[index];
+                if (option == null || string.IsNullOrWhiteSpace(option.actionId))
+                {
+                    continue;
+                }
+
+                authored.Add(new NpcServiceSnapshot(option.actionId, option.label ?? option.actionId, option.uiHint ?? string.Empty));
+            }
+
+            if (authored.Count > 0)
+            {
+                return authored.ToArray();
+            }
+        }
+
+        return BuildDefaultServiceOptions(services ?? Array.Empty<string>(), primaryRole);
+    }
+
+    private static NpcServiceSnapshot[] BuildDefaultServiceOptions(string[] services, string primaryRole)
+    {
+        var actions = new List<string>(services ?? Array.Empty<string>());
+        if (!string.IsNullOrWhiteSpace(primaryRole))
+        {
+            actions.Add(primaryRole);
+        }
+
+        return BuildDefaultServiceOptions(actions.ToArray());
+    }
+
+    private static NpcServiceSnapshot[] BuildDefaultServiceOptions(params string[] actions)
+    {
+        var options = new List<NpcServiceSnapshot>();
+        for (var index = 0; index < actions.Length; index++)
+        {
+            var value = (actions[index] ?? string.Empty).Trim().ToLowerInvariant();
+            if (value == "shop" || value == "crafting")
+            {
+                options.Add(new NpcServiceSnapshot("shop", "Shop", "Browse merchant stock"));
+            }
+            else if (value == "quest" || value == "quests")
+            {
+                options.Add(new NpcServiceSnapshot("quests", "Quests", "Review available work"));
+            }
+            else if (value == "trainer" || value == "training" || value == "progression")
+            {
+                options.Add(new NpcServiceSnapshot("training", "Training", "Review skill progression"));
+            }
+        }
+
+        return options
+            .GroupBy(option => option.ActionId, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToArray();
     }
 
     private static float DistanceSquared(NetworkVector3 a, NetworkVector3 b)
@@ -1211,6 +1650,21 @@ public sealed class UnityZoneServerRuntime : IDisposable
         };
     }
 
+    private static string ResolveSkillTrackId(SkillKind skillKind)
+    {
+        switch (skillKind)
+        {
+            case SkillKind.Woodcutting:
+                return "woodcutting";
+            case SkillKind.Mining:
+                return "mining";
+            case SkillKind.Crafting:
+                return "crafting";
+            default:
+                return "gathering";
+        }
+    }
+
     private async Task MaybeTransferAsync(ZonePlayer player, CancellationToken cancellationToken)
     {
         if (_definition.Contains(player.Position) || player.PendingDestinationZoneId.HasValue || player.ControlStream == null)
@@ -1243,6 +1697,7 @@ public sealed class UnityZoneServerRuntime : IDisposable
                     response.ZoneTcpPort,
                     response.ZoneUdpPort,
                     response.TransferToken,
+                    response.ZoneBundleName,
                     response.SpawnPosition),
                 cancellationToken).ConfigureAwait(false);
         }
@@ -1361,6 +1816,81 @@ public sealed class UnityZoneServerRuntime : IDisposable
         }
     }
 
+    private async Task ReportGameplayRewardAsync(Guid sessionId, string itemId, int itemQuantity, int maxStack, string skillTrackId, int skillExperience, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using (var client = new TcpClient())
+            {
+                await client.ConnectAsync(_controlHost, _controlPort).ConfigureAwait(false);
+                using (var stream = client.GetStream())
+                {
+                    await WireProtocol.WriteTcpMessageAsync(
+                        stream,
+                        new ZoneGameplayRewardMessage(sessionId, itemId, itemQuantity, maxStack, skillTrackId, skillExperience),
+                        cancellationToken).ConfigureAwait(false);
+                    await WireProtocol.ReadTcpMessageAsync(stream, cancellationToken).ConfigureAwait(false);
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning("Unity zone " + _definition.ZoneId + " failed to persist gameplay reward: " + ex.Message);
+        }
+    }
+
+    private async Task<GameplayServiceResponseMessage> RequestGameplayServiceAsync(GameplayServiceRequestMessage request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            using (var client = new TcpClient())
+            {
+                await client.ConnectAsync(_controlHost, _controlPort).ConfigureAwait(false);
+                using (var stream = client.GetStream())
+                {
+                    await WireProtocol.WriteTcpMessageAsync(stream, request, cancellationToken).ConfigureAwait(false);
+                    var response = await WireProtocol.ReadTcpMessageAsync(stream, cancellationToken).ConfigureAwait(false);
+                    if (response is GameplayServiceResponseMessage gameplayServiceResponse)
+                    {
+                        return gameplayServiceResponse;
+                    }
+
+                    if (response is ErrorMessage error)
+                    {
+                        return new GameplayServiceResponseMessage(request.SessionId, request.RequestId, request.ServiceKind, false, string.Empty, error.Text);
+                    }
+
+                    return new GameplayServiceResponseMessage(request.SessionId, request.RequestId, request.ServiceKind, false, string.Empty, "Unexpected gameplay service response.");
+                }
+            }
+        }
+        catch (Exception ex)
+        {
+            return new GameplayServiceResponseMessage(request.SessionId, request.RequestId, request.ServiceKind, false, string.Empty, ex.Message);
+        }
+    }
+
+    private async Task PushGameplayStateAsync(ZonePlayer player, CancellationToken cancellationToken)
+    {
+        var response = await RequestGameplayServiceAsync(
+            new GameplayServiceRequestMessage(
+                player.SessionId,
+                0,
+                GameplayServiceKind.FullState,
+                "{}"),
+            cancellationToken).ConfigureAwait(false);
+
+        if (!response.Success || string.IsNullOrWhiteSpace(response.PayloadJson))
+        {
+            return;
+        }
+
+        await SendToPlayerAsync(
+            player,
+            new GameplayStatePushMessage(player.SessionId, response.PayloadJson),
+            cancellationToken).ConfigureAwait(false);
+    }
+
     private async Task<ZoneTransferResponseMessage> RequestTransferAsync(Guid sessionId, NetworkVector3 position, CancellationToken cancellationToken)
     {
         using (var client = new TcpClient())
@@ -1382,10 +1912,10 @@ public sealed class UnityZoneServerRuntime : IDisposable
 
                 if (response is ErrorMessage error)
                 {
-                    return new ZoneTransferResponseMessage(false, sessionId, _definition.ZoneId, _definition.ZoneId, string.Empty, 0, 0, string.Empty, position, error.Text);
+                    return new ZoneTransferResponseMessage(false, sessionId, _definition.ZoneId, _definition.ZoneId, string.Empty, 0, 0, string.Empty, string.Empty, position, error.Text);
                 }
 
-                return new ZoneTransferResponseMessage(false, sessionId, _definition.ZoneId, _definition.ZoneId, string.Empty, 0, 0, string.Empty, position, "Unexpected control response.");
+                return new ZoneTransferResponseMessage(false, sessionId, _definition.ZoneId, _definition.ZoneId, string.Empty, 0, 0, string.Empty, string.Empty, position, "Unexpected control response.");
             }
         }
     }
@@ -1449,6 +1979,7 @@ public sealed class UnityZoneServerRuntime : IDisposable
         public float ManaRegenAccumulator { get; set; }
         public DateTimeOffset NextSpellAllowedUtc { get; set; }
         public DateTimeOffset NextGatherAllowedUtc { get; set; }
+        public DateTimeOffset NextAttackAllowedUtc { get; set; }
         public DateTimeOffset LastTcpSeenUtc { get; set; }
         public DateTimeOffset LastUdpSeenUtc { get; set; }
         public DateTimeOffset? DisconnectGraceDeadlineUtc { get; set; }
@@ -1671,7 +2202,8 @@ public sealed class UnityZoneServerRuntime : IDisposable
     {
         Haste = 1,
         StoneSkin = 2,
-        Rejuvenation = 3
+        Rejuvenation = 3,
+        Fireball = 4
     }
 
     private sealed class ActiveSpellEffect
@@ -1690,7 +2222,7 @@ public sealed class UnityZoneServerRuntime : IDisposable
 
     private sealed class SpellDefinition
     {
-        private SpellDefinition(string spellId, string displayName, SpellEffectType effectType, int manaCost, float durationSeconds, float cooldownSeconds, float power)
+        private SpellDefinition(string spellId, string displayName, SpellEffectType effectType, int manaCost, float durationSeconds, float cooldownSeconds, float power, bool requiresTarget, float range, int baseDamage)
         {
             SpellId = spellId;
             DisplayName = displayName;
@@ -1699,6 +2231,9 @@ public sealed class UnityZoneServerRuntime : IDisposable
             DurationSeconds = durationSeconds;
             CooldownSeconds = cooldownSeconds;
             Power = power;
+            RequiresTarget = requiresTarget;
+            Range = range;
+            BaseDamage = baseDamage;
         }
 
         public string SpellId { get; }
@@ -1708,14 +2243,18 @@ public sealed class UnityZoneServerRuntime : IDisposable
         public float DurationSeconds { get; }
         public float CooldownSeconds { get; }
         public float Power { get; }
+        public bool RequiresTarget { get; }
+        public float Range { get; }
+        public int BaseDamage { get; }
 
         public static SpellDefinition Resolve(string spellId)
         {
             return spellId switch
             {
-                "haste" => new SpellDefinition("haste", "Haste", SpellEffectType.Haste, 20, 12f, 8f, 0.35f),
-                "stoneskin" => new SpellDefinition("stoneskin", "Stone Skin", SpellEffectType.StoneSkin, 30, 18f, 10f, 0.25f),
-                "rejuvenation" => new SpellDefinition("rejuvenation", "Rejuvenation", SpellEffectType.Rejuvenation, 25, 10f, 10f, 0.5f),
+                "haste" => new SpellDefinition("haste", "Haste", SpellEffectType.Haste, 20, 12f, 8f, 0.35f, false, 0f, 0),
+                "stoneskin" => new SpellDefinition("stoneskin", "Stone Skin", SpellEffectType.StoneSkin, 30, 18f, 10f, 0.25f, false, 0f, 0),
+                "rejuvenation" => new SpellDefinition("rejuvenation", "Rejuvenation", SpellEffectType.Rejuvenation, 25, 10f, 10f, 0.5f, false, 0f, 0),
+                "fireball" => new SpellDefinition("fireball", "Fireball", SpellEffectType.Fireball, 18, 0f, 2.5f, 0f, true, 28f, 14),
                 _ => null
             };
         }
@@ -1743,7 +2282,7 @@ public sealed class UnityZoneServerRuntime : IDisposable
 
     private sealed class ZoneMob
     {
-        public ZoneMob(string mobId, string mobTypeId, NetworkVector3 spawnPosition, float speed, float wanderRadius)
+        public ZoneMob(string mobId, string mobTypeId, NetworkVector3 spawnPosition, float speed, float wanderRadius, int maxHitPoints)
         {
             MobId = mobId;
             MobTypeId = mobTypeId;
@@ -1752,6 +2291,8 @@ public sealed class UnityZoneServerRuntime : IDisposable
             TargetPosition = spawnPosition;
             Speed = speed;
             WanderRadius = wanderRadius;
+            MaxHitPoints = maxHitPoints;
+            HitPoints = maxHitPoints;
             State = "Idle";
             NextDecisionUtc = DateTimeOffset.UtcNow.AddSeconds(1.5);
         }
@@ -1765,8 +2306,35 @@ public sealed class UnityZoneServerRuntime : IDisposable
         public DateTimeOffset NextDecisionUtc { get; set; }
         public float Speed { get; private set; }
         public float WanderRadius { get; private set; }
+        public int HitPoints { get; set; }
+        public int MaxHitPoints { get; private set; }
         public string State { get; set; }
         public ulong? OwnerPlayerId { get; set; }
+        public DateTimeOffset? RespawnAvailableUtc { get; set; }
+    }
+
+    private sealed class NpcState
+    {
+        public NpcState(string npcId, string npcTypeId, string displayName, NetworkVector3 position, string primaryRole, string[] services, string greetingText, NpcServiceSnapshot[] serviceOptions)
+        {
+            NpcId = npcId;
+            NpcTypeId = npcTypeId;
+            DisplayName = displayName;
+            Position = position;
+            PrimaryRole = primaryRole;
+            Services = services ?? Array.Empty<string>();
+            GreetingText = greetingText ?? string.Empty;
+            ServiceOptions = serviceOptions ?? Array.Empty<NpcServiceSnapshot>();
+        }
+
+        public string NpcId { get; }
+        public string NpcTypeId { get; }
+        public string DisplayName { get; }
+        public NetworkVector3 Position { get; }
+        public string PrimaryRole { get; }
+        public string[] Services { get; }
+        public string GreetingText { get; }
+        public NpcServiceSnapshot[] ServiceOptions { get; }
     }
 
     private struct CellKey : IEquatable<CellKey>

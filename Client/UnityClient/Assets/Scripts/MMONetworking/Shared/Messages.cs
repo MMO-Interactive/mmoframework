@@ -2,6 +2,7 @@ using System;
 
 namespace MMONetworking
 {
+
 public enum TcpMessageKind : ushort
 {
     ClientHello = 1,
@@ -13,6 +14,8 @@ public enum TcpMessageKind : ushort
     Heartbeat = 7,
     Error = 8,
     DisconnectNotice = 9,
+    AccountServiceRequest = 10,
+    AccountServiceResponse = 11,
     ZoneAttachAuthorize = 100,
     ZoneAttachAuthorized = 101,
     ZoneStateUpdate = 102,
@@ -20,8 +23,14 @@ public enum TcpMessageKind : ushort
     ZoneTransferResponse = 104,
     ZonePrewarmRequest = 105,
     ZonePrewarmResponse = 106,
+    ZoneMobStateUpdate = 107,
+    ZoneStateBatchUpdate = 108,
+    ZoneGameplayReward = 109,
     GameplayCommand = 200,
-    GameplayResult = 201
+    GameplayResult = 201,
+    GameplayServiceRequest = 202,
+    GameplayServiceResponse = 203,
+    GameplayStatePush = 204
 }
 
 public enum UdpMessageKind : ushort
@@ -32,17 +41,9 @@ public enum UdpMessageKind : ushort
     TransferReady = 4
 }
 
-public abstract class TcpMessage
-{
-    protected TcpMessage(TcpMessageKind kind) => Kind = kind;
-    public TcpMessageKind Kind { get; }
-}
+public abstract record TcpMessage(TcpMessageKind Kind);
 
-public abstract class UdpMessage
-{
-    protected UdpMessage(UdpMessageKind kind) => Kind = kind;
-    public UdpMessageKind Kind { get; }
-}
+public abstract record UdpMessage(UdpMessageKind Kind);
 
 public enum AccountAuthMode : byte
 {
@@ -50,368 +51,205 @@ public enum AccountAuthMode : byte
     Register = 2
 }
 
-public sealed class ClientHelloMessage : TcpMessage
+public enum AccountServiceKind : byte
 {
-    public ClientHelloMessage(int protocolVersion, string accountId, string password, AccountAuthMode authMode, int requestedZoneId) : base(TcpMessageKind.ClientHello)
-    {
-        ProtocolVersion = protocolVersion;
-        AccountId = accountId;
-        Password = password;
-        AuthMode = authMode;
-        RequestedZoneId = requestedZoneId;
-    }
-
-    public int ProtocolVersion { get; }
-    public string AccountId { get; }
-    public string Password { get; }
-    public AccountAuthMode AuthMode { get; }
-    public int RequestedZoneId { get; }
+    CharacterList = 1,
+    CharacterCreate = 2,
+    CharacterSelect = 3
 }
 
-public sealed class HelloAcceptedMessage : TcpMessage
-{
-    public HelloAcceptedMessage(Guid sessionId, ulong playerId, int zoneId, string zoneHost, int zoneTcpPort, int zoneUdpPort, string transferToken, int snapshotRateHz)
-        : base(TcpMessageKind.HelloAccepted)
-    {
-        SessionId = sessionId;
-        PlayerId = playerId;
-        ZoneId = zoneId;
-        ZoneHost = zoneHost;
-        ZoneTcpPort = zoneTcpPort;
-        ZoneUdpPort = zoneUdpPort;
-        TransferToken = transferToken;
-        SnapshotRateHz = snapshotRateHz;
-    }
+public sealed record ClientHelloMessage(int ProtocolVersion, string AccountId, string Password, AccountAuthMode AuthMode, int RequestedZoneId)
+    : TcpMessage(TcpMessageKind.ClientHello);
 
-    public Guid SessionId { get; }
-    public ulong PlayerId { get; }
-    public int ZoneId { get; }
-    public string ZoneHost { get; }
-    public int ZoneTcpPort { get; }
-    public int ZoneUdpPort { get; }
-    public string TransferToken { get; }
-    public int SnapshotRateHz { get; }
-}
+public sealed record HelloAcceptedMessage(
+    Guid SessionId,
+    ulong PlayerId,
+    int ZoneId,
+    string ZoneHost,
+    int ZoneTcpPort,
+    int ZoneUdpPort,
+    string TransferToken,
+    string ZoneBundleName,
+    int SnapshotRateHz)
+    : TcpMessage(TcpMessageKind.HelloAccepted);
 
-public sealed class AttachToZoneMessage : TcpMessage
-{
-    public AttachToZoneMessage(Guid sessionId, ulong playerId, string transferToken) : base(TcpMessageKind.AttachToZone)
-    {
-        SessionId = sessionId;
-        PlayerId = playerId;
-        TransferToken = transferToken;
-    }
+public sealed record AttachToZoneMessage(Guid SessionId, ulong PlayerId, string TransferToken)
+    : TcpMessage(TcpMessageKind.AttachToZone);
 
-    public Guid SessionId { get; }
-    public ulong PlayerId { get; }
-    public string TransferToken { get; }
-}
+public sealed record AttachAcceptedMessage(Guid SessionId, int ZoneId, NetworkVector3 SpawnPosition)
+    : TcpMessage(TcpMessageKind.AttachAccepted);
 
-public sealed class AttachAcceptedMessage : TcpMessage
-{
-    public AttachAcceptedMessage(Guid sessionId, int zoneId, NetworkVector3 spawnPosition) : base(TcpMessageKind.AttachAccepted)
-    {
-        SessionId = sessionId;
-        ZoneId = zoneId;
-        SpawnPosition = spawnPosition;
-    }
+public sealed record ZoneTransferPrepareMessage(
+    Guid SessionId,
+    Guid TransferId,
+    int FromZoneId,
+    int ToZoneId,
+    string ZoneHost,
+    int ZoneTcpPort,
+    int ZoneUdpPort,
+    string TransferToken,
+    string ZoneBundleName,
+    NetworkVector3 SpawnPosition)
+    : TcpMessage(TcpMessageKind.ZoneTransferPrepare);
 
-    public Guid SessionId { get; }
-    public int ZoneId { get; }
-    public NetworkVector3 SpawnPosition { get; }
-}
+public sealed record ZoneTransferCommittedMessage(Guid SessionId, Guid TransferId, int ZoneId)
+    : TcpMessage(TcpMessageKind.ZoneTransferCommitted);
 
-public sealed class ZoneTransferPrepareMessage : TcpMessage
-{
-    public ZoneTransferPrepareMessage(Guid sessionId, Guid transferId, int fromZoneId, int toZoneId, string zoneHost, int zoneTcpPort, int zoneUdpPort, string transferToken, NetworkVector3 spawnPosition)
-        : base(TcpMessageKind.ZoneTransferPrepare)
-    {
-        SessionId = sessionId;
-        TransferId = transferId;
-        FromZoneId = fromZoneId;
-        ToZoneId = toZoneId;
-        ZoneHost = zoneHost;
-        ZoneTcpPort = zoneTcpPort;
-        ZoneUdpPort = zoneUdpPort;
-        TransferToken = transferToken;
-        SpawnPosition = spawnPosition;
-    }
+public sealed record HeartbeatMessage(long ServerTicks)
+    : TcpMessage(TcpMessageKind.Heartbeat);
 
-    public Guid SessionId { get; }
-    public Guid TransferId { get; }
-    public int FromZoneId { get; }
-    public int ToZoneId { get; }
-    public string ZoneHost { get; }
-    public int ZoneTcpPort { get; }
-    public int ZoneUdpPort { get; }
-    public string TransferToken { get; }
-    public NetworkVector3 SpawnPosition { get; }
-}
+public sealed record ErrorMessage(string Text)
+    : TcpMessage(TcpMessageKind.Error);
 
-public sealed class ZoneTransferCommittedMessage : TcpMessage
-{
-    public ZoneTransferCommittedMessage(Guid sessionId, Guid transferId, int zoneId) : base(TcpMessageKind.ZoneTransferCommitted)
-    {
-        SessionId = sessionId;
-        TransferId = transferId;
-        ZoneId = zoneId;
-    }
+public sealed record DisconnectNoticeMessage(string Reason, bool CanReconnect, int GraceSeconds)
+    : TcpMessage(TcpMessageKind.DisconnectNotice);
 
-    public Guid SessionId { get; }
-    public Guid TransferId { get; }
-    public int ZoneId { get; }
-}
+public sealed record AccountServiceRequestMessage(
+    uint RequestId,
+    AccountServiceKind ServiceKind,
+    string AccountName,
+    string Password,
+    string PayloadJson)
+    : TcpMessage(TcpMessageKind.AccountServiceRequest);
 
-public sealed class HeartbeatMessage : TcpMessage
-{
-    public HeartbeatMessage(long serverTicks) : base(TcpMessageKind.Heartbeat) => ServerTicks = serverTicks;
-    public long ServerTicks { get; }
-}
+public sealed record AccountServiceResponseMessage(
+    uint RequestId,
+    AccountServiceKind ServiceKind,
+    bool Success,
+    string PayloadJson,
+    string ErrorText)
+    : TcpMessage(TcpMessageKind.AccountServiceResponse);
 
-public sealed class ErrorMessage : TcpMessage
-{
-    public ErrorMessage(string text) : base(TcpMessageKind.Error) => Text = text;
-    public string Text { get; }
-}
+public sealed record ZoneAttachAuthorizeMessage(Guid SessionId, ulong PlayerId, int ZoneId, string TransferToken)
+    : TcpMessage(TcpMessageKind.ZoneAttachAuthorize);
 
-public sealed class DisconnectNoticeMessage : TcpMessage
-{
-    public DisconnectNoticeMessage(string reason, bool canReconnect, int graceSeconds) : base(TcpMessageKind.DisconnectNotice)
-    {
-        Reason = reason;
-        CanReconnect = canReconnect;
-        GraceSeconds = graceSeconds;
-    }
+public sealed record ZoneAttachAuthorizedMessage(bool Success, Guid SessionId, ulong PlayerId, int ZoneId, NetworkVector3 SpawnPosition, string ErrorText)
+    : TcpMessage(TcpMessageKind.ZoneAttachAuthorized);
 
-    public string Reason { get; }
-    public bool CanReconnect { get; }
-    public int GraceSeconds { get; }
-}
+public sealed record ZoneStateUpdateMessage(Guid SessionId, int ZoneId, NetworkVector3 Position)
+    : TcpMessage(TcpMessageKind.ZoneStateUpdate);
 
-public sealed class ZoneAttachAuthorizeMessage : TcpMessage
-{
-    public ZoneAttachAuthorizeMessage(Guid sessionId, ulong playerId, int zoneId, string transferToken) : base(TcpMessageKind.ZoneAttachAuthorize)
-    {
-        SessionId = sessionId;
-        PlayerId = playerId;
-        ZoneId = zoneId;
-        TransferToken = transferToken;
-    }
+public sealed record ZoneTransferRequestMessage(Guid SessionId, int ZoneId, NetworkVector3 Position)
+    : TcpMessage(TcpMessageKind.ZoneTransferRequest);
 
-    public Guid SessionId { get; }
-    public ulong PlayerId { get; }
-    public int ZoneId { get; }
-    public string TransferToken { get; }
-}
+public sealed record ZoneTransferResponseMessage(
+    bool ShouldTransfer,
+    Guid SessionId,
+    int FromZoneId,
+    int ToZoneId,
+    string ZoneHost,
+    int ZoneTcpPort,
+    int ZoneUdpPort,
+    string TransferToken,
+    string ZoneBundleName,
+    NetworkVector3 SpawnPosition,
+    string ErrorText)
+    : TcpMessage(TcpMessageKind.ZoneTransferResponse);
 
-public sealed class ZoneAttachAuthorizedMessage : TcpMessage
-{
-    public ZoneAttachAuthorizedMessage(bool success, Guid sessionId, ulong playerId, int zoneId, NetworkVector3 spawnPosition, string errorText) : base(TcpMessageKind.ZoneAttachAuthorized)
-    {
-        Success = success;
-        SessionId = sessionId;
-        PlayerId = playerId;
-        ZoneId = zoneId;
-        SpawnPosition = spawnPosition;
-        ErrorText = errorText;
-    }
+public sealed record ZonePrewarmRequestMessage(Guid SessionId, int ZoneId, NetworkVector3 Position)
+    : TcpMessage(TcpMessageKind.ZonePrewarmRequest);
 
-    public bool Success { get; }
-    public Guid SessionId { get; }
-    public ulong PlayerId { get; }
-    public int ZoneId { get; }
-    public NetworkVector3 SpawnPosition { get; }
-    public string ErrorText { get; }
-}
+public sealed record ZonePrewarmResponseMessage(bool Started, Guid SessionId, int ZoneId, int DestinationZoneId, string ErrorText)
+    : TcpMessage(TcpMessageKind.ZonePrewarmResponse);
 
-public sealed class ZoneStateUpdateMessage : TcpMessage
-{
-    public ZoneStateUpdateMessage(Guid sessionId, int zoneId, NetworkVector3 position) : base(TcpMessageKind.ZoneStateUpdate)
-    {
-        SessionId = sessionId;
-        ZoneId = zoneId;
-        Position = position;
-    }
+public sealed record ZoneMobStateUpdateMessage(int ZoneId, MobSnapshot[] Mobs)
+    : TcpMessage(TcpMessageKind.ZoneMobStateUpdate);
 
-    public Guid SessionId { get; }
-    public int ZoneId { get; }
-    public NetworkVector3 Position { get; }
-}
+public sealed record ZoneStateBatchUpdateMessage(int ZoneId, ZonePlayerStateUpdate[] Players)
+    : TcpMessage(TcpMessageKind.ZoneStateBatchUpdate);
 
-public sealed class ZoneTransferRequestMessage : TcpMessage
-{
-    public ZoneTransferRequestMessage(Guid sessionId, int zoneId, NetworkVector3 position) : base(TcpMessageKind.ZoneTransferRequest)
-    {
-        SessionId = sessionId;
-        ZoneId = zoneId;
-        Position = position;
-    }
-
-    public Guid SessionId { get; }
-    public int ZoneId { get; }
-    public NetworkVector3 Position { get; }
-}
-
-public sealed class ZoneTransferResponseMessage : TcpMessage
-{
-    public ZoneTransferResponseMessage(bool shouldTransfer, Guid sessionId, int fromZoneId, int toZoneId, string zoneHost, int zoneTcpPort, int zoneUdpPort, string transferToken, NetworkVector3 spawnPosition, string errorText)
-        : base(TcpMessageKind.ZoneTransferResponse)
-    {
-        ShouldTransfer = shouldTransfer;
-        SessionId = sessionId;
-        FromZoneId = fromZoneId;
-        ToZoneId = toZoneId;
-        ZoneHost = zoneHost;
-        ZoneTcpPort = zoneTcpPort;
-        ZoneUdpPort = zoneUdpPort;
-        TransferToken = transferToken;
-        SpawnPosition = spawnPosition;
-        ErrorText = errorText;
-    }
-
-    public bool ShouldTransfer { get; }
-    public Guid SessionId { get; }
-    public int FromZoneId { get; }
-    public int ToZoneId { get; }
-    public string ZoneHost { get; }
-    public int ZoneTcpPort { get; }
-    public int ZoneUdpPort { get; }
-    public string TransferToken { get; }
-    public NetworkVector3 SpawnPosition { get; }
-    public string ErrorText { get; }
-}
-
-public sealed class ZonePrewarmRequestMessage : TcpMessage
-{
-    public ZonePrewarmRequestMessage(Guid sessionId, int zoneId, NetworkVector3 position) : base(TcpMessageKind.ZonePrewarmRequest)
-    {
-        SessionId = sessionId;
-        ZoneId = zoneId;
-        Position = position;
-    }
-
-    public Guid SessionId { get; }
-    public int ZoneId { get; }
-    public NetworkVector3 Position { get; }
-}
-
-public sealed class ZonePrewarmResponseMessage : TcpMessage
-{
-    public ZonePrewarmResponseMessage(bool started, Guid sessionId, int zoneId, int destinationZoneId, string errorText) : base(TcpMessageKind.ZonePrewarmResponse)
-    {
-        Started = started;
-        SessionId = sessionId;
-        ZoneId = zoneId;
-        DestinationZoneId = destinationZoneId;
-        ErrorText = errorText;
-    }
-
-    public bool Started { get; }
-    public Guid SessionId { get; }
-    public int ZoneId { get; }
-    public int DestinationZoneId { get; }
-    public string ErrorText { get; }
-}
+public sealed record ZoneGameplayRewardMessage(
+    Guid SessionId,
+    string ItemId,
+    int ItemQuantity,
+    int MaxStack,
+    string SkillTrackId,
+    int SkillExperience)
+    : TcpMessage(TcpMessageKind.ZoneGameplayReward);
 
 public enum GameplayCommandKind : byte
 {
     Gather = 1,
-    InspectInventory = 2
+    InspectInventory = 2,
+    CastSpell = 3,
+    Farming = 4,
+    Tame = 5,
+    Craft = 6,
+    Attack = 7
 }
 
-public sealed class GameplayCommandMessage : TcpMessage
+public enum GameplayServiceKind : byte
 {
-    public GameplayCommandMessage(Guid sessionId, uint commandId, GameplayCommandKind commandKind, string targetId) : base(TcpMessageKind.GameplayCommand)
-    {
-        SessionId = sessionId;
-        CommandId = commandId;
-        CommandKind = commandKind;
-        TargetId = targetId;
-    }
-
-    public Guid SessionId { get; }
-    public uint CommandId { get; }
-    public GameplayCommandKind CommandKind { get; }
-    public string TargetId { get; }
+    Inventory = 1,
+    CraftingRecipes = 2,
+    CraftRecipe = 3,
+    Progression = 4,
+    CombatSnapshot = 5,
+    CombatEnsure = 6,
+    CombatAttack = 7,
+    Reputation = 8,
+    QuestBoard = 9,
+    QuestAction = 10,
+    QuestClaim = 11,
+    WorldEvents = 12,
+    WorldEventContribute = 13,
+    WorldEventClaim = 14,
+    Invasions = 15,
+    InvasionRecordKill = 16,
+    InvasionClaim = 17,
+    FullState = 18,
+    ShopCatalog = 19,
+    ShopPurchase = 20,
+    NpcContext = 21
 }
 
-public sealed class GameplayResultMessage : TcpMessage
-{
-    public GameplayResultMessage(Guid sessionId, uint commandId, bool success, string text, string itemId, int itemCount, int skillValue) : base(TcpMessageKind.GameplayResult)
-    {
-        SessionId = sessionId;
-        CommandId = commandId;
-        Success = success;
-        Text = text;
-        ItemId = itemId;
-        ItemCount = itemCount;
-        SkillValue = skillValue;
-    }
+public sealed record GameplayCommandMessage(
+    Guid SessionId,
+    uint CommandId,
+    GameplayCommandKind CommandKind,
+    string TargetId)
+    : TcpMessage(TcpMessageKind.GameplayCommand);
 
-    public Guid SessionId { get; }
-    public uint CommandId { get; }
-    public bool Success { get; }
-    public string Text { get; }
-    public string ItemId { get; }
-    public int ItemCount { get; }
-    public int SkillValue { get; }
-}
+public sealed record GameplayResultMessage(
+    Guid SessionId,
+    uint CommandId,
+    bool Success,
+    string Text,
+    string ItemId,
+    int ItemCount,
+    int SkillValue)
+    : TcpMessage(TcpMessageKind.GameplayResult);
 
-public sealed class ClientInputMessage : UdpMessage
-{
-    public ClientInputMessage(Guid sessionId, uint sequence, NetworkVector3 move, float deltaTimeSeconds) : base(UdpMessageKind.ClientInput)
-    {
-        SessionId = sessionId;
-        Sequence = sequence;
-        Move = move;
-        DeltaTimeSeconds = deltaTimeSeconds;
-    }
+public sealed record GameplayServiceRequestMessage(
+    Guid SessionId,
+    uint RequestId,
+    GameplayServiceKind ServiceKind,
+    string PayloadJson)
+    : TcpMessage(TcpMessageKind.GameplayServiceRequest);
 
-    public Guid SessionId { get; }
-    public uint Sequence { get; }
-    public NetworkVector3 Move { get; }
-    public float DeltaTimeSeconds { get; }
-}
+public sealed record GameplayServiceResponseMessage(
+    Guid SessionId,
+    uint RequestId,
+    GameplayServiceKind ServiceKind,
+    bool Success,
+    string PayloadJson,
+    string ErrorText)
+    : TcpMessage(TcpMessageKind.GameplayServiceResponse);
 
-public sealed class WorldSnapshotMessage : UdpMessage
-{
-    public WorldSnapshotMessage(int zoneId, uint tick, PlayerSnapshot[] players, ResourceNodeSnapshot[] resourceNodes, MobSnapshot[] mobs) : base(UdpMessageKind.WorldSnapshot)
-    {
-        ZoneId = zoneId;
-        Tick = tick;
-        Players = players;
-        ResourceNodes = resourceNodes;
-        Mobs = mobs;
-    }
+public sealed record GameplayStatePushMessage(
+    Guid SessionId,
+    string PayloadJson)
+    : TcpMessage(TcpMessageKind.GameplayStatePush);
 
-    public int ZoneId { get; }
-    public uint Tick { get; }
-    public PlayerSnapshot[] Players { get; }
-    public ResourceNodeSnapshot[] ResourceNodes { get; }
-    public MobSnapshot[] Mobs { get; }
-}
+public sealed record ClientInputMessage(Guid SessionId, uint Sequence, NetworkVector3 Move, float DeltaTimeSeconds)
+    : UdpMessage(UdpMessageKind.ClientInput);
 
-public sealed class TransferProbeMessage : UdpMessage
-{
-    public TransferProbeMessage(Guid sessionId, string transferToken) : base(UdpMessageKind.TransferProbe)
-    {
-        SessionId = sessionId;
-        TransferToken = transferToken;
-    }
+public sealed record WorldSnapshotMessage(int ZoneId, uint Tick, PlayerSnapshot[] Players, ResourceNodeSnapshot[] ResourceNodes, MobSnapshot[] Mobs, NpcSnapshot[] Npcs)
+    : UdpMessage(UdpMessageKind.WorldSnapshot);
 
-    public Guid SessionId { get; }
-    public string TransferToken { get; }
-}
+public sealed record TransferProbeMessage(Guid SessionId, string TransferToken)
+    : UdpMessage(UdpMessageKind.TransferProbe);
 
-public sealed class TransferReadyMessage : UdpMessage
-{
-    public TransferReadyMessage(Guid sessionId, int zoneId) : base(UdpMessageKind.TransferReady)
-    {
-        SessionId = sessionId;
-        ZoneId = zoneId;
-    }
-
-    public Guid SessionId { get; }
-    public int ZoneId { get; }
-}
+public sealed record TransferReadyMessage(Guid SessionId, int ZoneId)
+    : UdpMessage(UdpMessageKind.TransferReady);
 }

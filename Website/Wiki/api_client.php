@@ -6,7 +6,7 @@ function api_base_url(): string
 {
     $env = getenv('MMO_DASHBOARD_BASE_URL');
     if ($env === false || trim($env) === '') {
-        return 'http://127.0.0.1:8081';
+        return 'http://127.0.0.1:7080';
     }
 
     return rtrim(trim($env), '/');

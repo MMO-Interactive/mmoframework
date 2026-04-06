@@ -86,7 +86,10 @@ public sealed record GameplayDefinitionsSnapshot(
     SkillDefinitionSnapshot[] Skills,
     ResourceDefinitionSnapshot[] Resources,
     ResourceNodeDefinitionSnapshot[] Nodes,
-    ZoneDefinitionSnapshot[] Zones);
+    ZoneDefinitionSnapshot[] Zones,
+    NpcDefinitionSnapshot[] Npcs,
+    PlayerSpawnDefinitionSnapshot[] PlayerSpawns,
+    MobSpawnDefinitionSnapshot[] MobSpawns);
 
 public sealed record ItemDefinitionSnapshot(
     string Id,
@@ -117,10 +120,50 @@ public sealed record ResourceNodeDefinitionSnapshot(
 public sealed record ZoneDefinitionSnapshot(
     int ZoneId,
     string Name,
+    string ZoneAssetBundle,
     float MinX,
     float MaxX,
     float MinZ,
     float MaxZ);
+
+public sealed record NpcServiceDefinitionSnapshot(
+    string ActionId,
+    string Label,
+    string UiHint);
+
+public sealed record NpcDefinitionSnapshot(
+    string NpcId,
+    int ZoneId,
+    string NpcTypeId,
+    string DisplayName,
+    float PositionX,
+    float PositionY,
+    float PositionZ,
+    string PrimaryRole,
+    string[] Services,
+    string GreetingText,
+    NpcServiceDefinitionSnapshot[] ServiceOptions);
+
+public sealed record PlayerSpawnDefinitionSnapshot(
+    string SpawnId,
+    int ZoneId,
+    float PositionX,
+    float PositionY,
+    float PositionZ,
+    bool IsDefaultSpawn,
+    float FacingYaw,
+    string SpawnTag);
+
+public sealed record MobSpawnDefinitionSnapshot(
+    string SpawnId,
+    int ZoneId,
+    string MobTypeId,
+    float PositionX,
+    float PositionY,
+    float PositionZ,
+    int Count,
+    float Radius,
+    float RoamRadius);
 
 public sealed record ModerationSnapshot(
     AccountModerationSnapshot[] Accounts,
@@ -176,13 +219,34 @@ public sealed record CraftingRecipeSnapshot(
     string OutputItemId,
     int OutputQuantity,
     int CraftSeconds,
-    CraftingIngredientSnapshot[] Ingredients);
+    CraftingIngredientSnapshot[] Ingredients,
+    string ProviderNpcId);
 
 public sealed record CraftingResultSnapshot(
     bool Success,
     string Message,
     ulong CharacterId,
     string RecipeId,
+    InventorySnapshot Inventory);
+
+public sealed record ShopOfferSnapshot(
+    string OfferId,
+    string NpcId,
+    string ItemId,
+    string ItemName,
+    int Quantity,
+    string PriceItemId,
+    int PriceItemQuantity);
+
+public sealed record ShopCatalogSnapshot(
+    string NpcId,
+    ShopOfferSnapshot[] Offers);
+
+public sealed record ShopPurchaseSnapshot(
+    bool Success,
+    string Message,
+    string OfferId,
+    ulong CharacterId,
     InventorySnapshot Inventory);
 
 public sealed record CharacterProgressionSnapshot(
@@ -242,7 +306,8 @@ public sealed record QuestDefinitionSnapshot(
     int TargetCount,
     int RewardExperience,
     string RewardReputationFaction,
-    int RewardReputationAmount);
+    int RewardReputationAmount,
+    string GiverNpcId);
 
 public sealed record QuestProgressSnapshot(
     ulong CharacterId,
@@ -363,3 +428,13 @@ public sealed record InvasionClaimSnapshot(
     string AwardedReputationFaction,
     int AwardedReputationAmount,
     string Message);
+
+public sealed record GameplayBundleSnapshot(
+    InventorySnapshot Inventory,
+    CraftingRecipeSnapshot[] CraftingRecipes,
+    CharacterProgressionSnapshot Progression,
+    CombatSnapshot Combat,
+    ReputationProfileSnapshot Reputation,
+    QuestBoardSnapshot QuestBoard,
+    WorldEventBoardSnapshot WorldEvents,
+    InvasionBoardSnapshot Invasions);

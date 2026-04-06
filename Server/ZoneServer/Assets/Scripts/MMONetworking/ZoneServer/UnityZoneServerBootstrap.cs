@@ -18,11 +18,13 @@ public sealed class UnityZoneServerBootstrap : MonoBehaviour
     [SerializeField] private int tcpPort = 7301;
     [SerializeField] private int udpPort = 7401;
     [SerializeField] private float minX = 0f;
-    [SerializeField] private float maxX = 100f;
+    [SerializeField] private float maxX = 2000f;
     [SerializeField] private float minZ = 0f;
-    [SerializeField] private float maxZ = 100f;
+    [SerializeField] private float maxZ = 2000f;
     [SerializeField] private float prewarmMargin = 20f;
     [SerializeField] private int mobCount = 2;
+    [SerializeField] private string npcDefinitionsFile = "";
+    [SerializeField] private string mobSpawnDefinitionsFile = "";
     [Header("Control Plane")]
     [SerializeField] private string controlHost = "127.0.0.1";
     [SerializeField] private int controlPort = 7050;
@@ -41,6 +43,8 @@ public sealed class UnityZoneServerBootstrap : MonoBehaviour
     private string _status = "Idle";
     private AssetBundle _loadedBundle;
     private readonly List<string> _loadedSceneNames = new List<string>();
+    private NpcDefinitionData[] _npcDefinitions = Array.Empty<NpcDefinitionData>();
+    private MobSpawnDefinitionData[] _mobSpawnDefinitions = Array.Empty<MobSpawnDefinitionData>();
 
     public string Status => _status;
 
@@ -76,7 +80,7 @@ public sealed class UnityZoneServerBootstrap : MonoBehaviour
         }
 
         var definition = new ZoneDefinition(zoneId, zoneName, host, tcpPort, udpPort, minX, maxX, minZ, maxZ);
-        _runtime = new UnityZoneServerRuntime(definition, controlHost, controlPort, prewarmMargin, mobCount);
+        _runtime = new UnityZoneServerRuntime(definition, controlHost, controlPort, prewarmMargin, mobCount, _npcDefinitions, _mobSpawnDefinitions);
         _status = "Starting";
         _runTask = _runtime.RunAsync();
         await Task.Yield();
@@ -105,6 +109,8 @@ public sealed class UnityZoneServerBootstrap : MonoBehaviour
         maxZ = ReadFloat(args, "-mmo-max-z", maxZ);
         prewarmMargin = ReadFloat(args, "-mmo-prewarm-margin", prewarmMargin);
         mobCount = ReadInt(args, "-mmo-mob-count", mobCount);
+        npcDefinitionsFile = ReadString(args, "-mmo-npcs-file", npcDefinitionsFile);
+        mobSpawnDefinitionsFile = ReadString(args, "-mmo-mob-spawns-file", mobSpawnDefinitionsFile);
         controlHost = ReadString(args, "-mmo-control-host", controlHost);
         controlPort = ReadInt(args, "-mmo-control-port", controlPort);
         assetApiBaseUrl = ReadString(args, "-mmo-asset-api-base-url", assetApiBaseUrl);
@@ -112,6 +118,8 @@ public sealed class UnityZoneServerBootstrap : MonoBehaviour
         assetPlatform = ReadString(args, "-mmo-asset-platform", assetPlatform);
         zoneBundleName = ReadString(args, "-mmo-zone-bundle-name", zoneBundleName);
         zoneBundleHashOverride = ReadString(args, "-mmo-zone-bundle-hash", zoneBundleHashOverride);
+        _npcDefinitions = LoadNpcDefinitions(npcDefinitionsFile, zoneId);
+        _mobSpawnDefinitions = LoadMobSpawnDefinitions(mobSpawnDefinitionsFile, zoneId);
     }
 
     private async Task TryLoadZoneBundleAsync()
@@ -276,6 +284,146 @@ public sealed class UnityZoneServerBootstrap : MonoBehaviour
         }
 
         return fallback;
+    }
+
+    private static NpcDefinitionData[] LoadNpcDefinitions(string path, int currentZoneId)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            return Array.Empty<NpcDefinitionData>();
+        }
+
+        try
+        {
+            var json = File.ReadAllText(path);
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                return Array.Empty<NpcDefinitionData>();
+            }
+
+            var file = JsonUtility.FromJson<NpcDefinitionFileData>(json);
+            if (file == null || file.npcs == null)
+            {
+                return Array.Empty<NpcDefinitionData>();
+            }
+
+            var filtered = new List<NpcDefinitionData>();
+            for (var i = 0; i < file.npcs.Length; i++)
+            {
+                var npc = file.npcs[i];
+                if (npc != null && npc.zoneId == currentZoneId)
+                {
+                    if (npc.services == null)
+                    {
+                        npc.services = Array.Empty<string>();
+                    }
+
+                    if (npc.serviceOptions == null)
+                    {
+                        npc.serviceOptions = Array.Empty<NpcServiceDefinitionData>();
+                    }
+
+                    filtered.Add(npc);
+                }
+            }
+
+            return filtered.ToArray();
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning("Failed to load NPC definitions file: " + ex.Message);
+            return Array.Empty<NpcDefinitionData>();
+        }
+    }
+
+    private static MobSpawnDefinitionData[] LoadMobSpawnDefinitions(string path, int currentZoneId)
+    {
+        if (string.IsNullOrWhiteSpace(path) || !File.Exists(path))
+        {
+            return Array.Empty<MobSpawnDefinitionData>();
+        }
+
+        try
+        {
+            var json = File.ReadAllText(path);
+            if (string.IsNullOrWhiteSpace(json))
+            {
+                return Array.Empty<MobSpawnDefinitionData>();
+            }
+
+            var file = JsonUtility.FromJson<MobSpawnDefinitionFileData>(json);
+            if (file == null || file.mobSpawns == null)
+            {
+                return Array.Empty<MobSpawnDefinitionData>();
+            }
+
+            var filtered = new List<MobSpawnDefinitionData>();
+            for (var i = 0; i < file.mobSpawns.Length; i++)
+            {
+                var spawn = file.mobSpawns[i];
+                if (spawn != null && spawn.zoneId == currentZoneId)
+                {
+                    filtered.Add(spawn);
+                }
+            }
+
+            return filtered.ToArray();
+        }
+        catch (Exception ex)
+        {
+            Debug.LogWarning("Failed to load mob spawn definitions file: " + ex.Message);
+            return Array.Empty<MobSpawnDefinitionData>();
+        }
+    }
+
+    [Serializable]
+    private sealed class NpcDefinitionFileData
+    {
+        public NpcDefinitionData[] npcs;
+    }
+
+    [Serializable]
+    private sealed class MobSpawnDefinitionFileData
+    {
+        public MobSpawnDefinitionData[] mobSpawns;
+    }
+
+    [Serializable]
+    public sealed class NpcDefinitionData
+    {
+        public string npcId;
+        public int zoneId;
+        public string npcTypeId;
+        public string displayName;
+        public float positionX;
+        public float positionY;
+        public float positionZ;
+        public string primaryRole;
+        public string[] services;
+        public string greetingText;
+        public NpcServiceDefinitionData[] serviceOptions;
+    }
+
+    [Serializable]
+    public sealed class NpcServiceDefinitionData
+    {
+        public string actionId;
+        public string label;
+        public string uiHint;
+    }
+
+    [Serializable]
+    public sealed class MobSpawnDefinitionData
+    {
+        public string spawnId;
+        public int zoneId;
+        public string mobTypeId;
+        public float positionX;
+        public float positionY;
+        public float positionZ;
+        public int count;
+        public float radius;
+        public float roamRadius;
     }
 }
 }

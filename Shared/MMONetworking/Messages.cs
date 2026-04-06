@@ -13,6 +13,8 @@ public enum TcpMessageKind : ushort
     Heartbeat = 7,
     Error = 8,
     DisconnectNotice = 9,
+    AccountServiceRequest = 10,
+    AccountServiceResponse = 11,
     ZoneAttachAuthorize = 100,
     ZoneAttachAuthorized = 101,
     ZoneStateUpdate = 102,
@@ -22,8 +24,12 @@ public enum TcpMessageKind : ushort
     ZonePrewarmResponse = 106,
     ZoneMobStateUpdate = 107,
     ZoneStateBatchUpdate = 108,
+    ZoneGameplayReward = 109,
     GameplayCommand = 200,
-    GameplayResult = 201
+    GameplayResult = 201,
+    GameplayServiceRequest = 202,
+    GameplayServiceResponse = 203,
+    GameplayStatePush = 204
 }
 
 public enum UdpMessageKind : ushort
@@ -44,6 +50,13 @@ public enum AccountAuthMode : byte
     Register = 2
 }
 
+public enum AccountServiceKind : byte
+{
+    CharacterList = 1,
+    CharacterCreate = 2,
+    CharacterSelect = 3
+}
+
 public sealed record ClientHelloMessage(int ProtocolVersion, string AccountId, string Password, AccountAuthMode AuthMode, int RequestedZoneId)
     : TcpMessage(TcpMessageKind.ClientHello);
 
@@ -55,6 +68,7 @@ public sealed record HelloAcceptedMessage(
     int ZoneTcpPort,
     int ZoneUdpPort,
     string TransferToken,
+    string ZoneBundleName,
     int SnapshotRateHz)
     : TcpMessage(TcpMessageKind.HelloAccepted);
 
@@ -73,6 +87,7 @@ public sealed record ZoneTransferPrepareMessage(
     int ZoneTcpPort,
     int ZoneUdpPort,
     string TransferToken,
+    string ZoneBundleName,
     NetworkVector3 SpawnPosition)
     : TcpMessage(TcpMessageKind.ZoneTransferPrepare);
 
@@ -87,6 +102,22 @@ public sealed record ErrorMessage(string Text)
 
 public sealed record DisconnectNoticeMessage(string Reason, bool CanReconnect, int GraceSeconds)
     : TcpMessage(TcpMessageKind.DisconnectNotice);
+
+public sealed record AccountServiceRequestMessage(
+    uint RequestId,
+    AccountServiceKind ServiceKind,
+    string AccountName,
+    string Password,
+    string PayloadJson)
+    : TcpMessage(TcpMessageKind.AccountServiceRequest);
+
+public sealed record AccountServiceResponseMessage(
+    uint RequestId,
+    AccountServiceKind ServiceKind,
+    bool Success,
+    string PayloadJson,
+    string ErrorText)
+    : TcpMessage(TcpMessageKind.AccountServiceResponse);
 
 public sealed record ZoneAttachAuthorizeMessage(Guid SessionId, ulong PlayerId, int ZoneId, string TransferToken)
     : TcpMessage(TcpMessageKind.ZoneAttachAuthorize);
@@ -109,6 +140,7 @@ public sealed record ZoneTransferResponseMessage(
     int ZoneTcpPort,
     int ZoneUdpPort,
     string TransferToken,
+    string ZoneBundleName,
     NetworkVector3 SpawnPosition,
     string ErrorText)
     : TcpMessage(TcpMessageKind.ZoneTransferResponse);
@@ -125,6 +157,15 @@ public sealed record ZoneMobStateUpdateMessage(int ZoneId, MobSnapshot[] Mobs)
 public sealed record ZoneStateBatchUpdateMessage(int ZoneId, ZonePlayerStateUpdate[] Players)
     : TcpMessage(TcpMessageKind.ZoneStateBatchUpdate);
 
+public sealed record ZoneGameplayRewardMessage(
+    Guid SessionId,
+    string ItemId,
+    int ItemQuantity,
+    int MaxStack,
+    string SkillTrackId,
+    int SkillExperience)
+    : TcpMessage(TcpMessageKind.ZoneGameplayReward);
+
 public enum GameplayCommandKind : byte
 {
     Gather = 1,
@@ -132,7 +173,33 @@ public enum GameplayCommandKind : byte
     CastSpell = 3,
     Farming = 4,
     Tame = 5,
-    Craft = 6
+    Craft = 6,
+    Attack = 7
+}
+
+public enum GameplayServiceKind : byte
+{
+    Inventory = 1,
+    CraftingRecipes = 2,
+    CraftRecipe = 3,
+    Progression = 4,
+    CombatSnapshot = 5,
+    CombatEnsure = 6,
+    CombatAttack = 7,
+    Reputation = 8,
+    QuestBoard = 9,
+    QuestAction = 10,
+    QuestClaim = 11,
+    WorldEvents = 12,
+    WorldEventContribute = 13,
+    WorldEventClaim = 14,
+    Invasions = 15,
+    InvasionRecordKill = 16,
+    InvasionClaim = 17,
+    FullState = 18,
+    ShopCatalog = 19,
+    ShopPurchase = 20,
+    NpcContext = 21
 }
 
 public sealed record GameplayCommandMessage(
@@ -152,10 +219,31 @@ public sealed record GameplayResultMessage(
     int SkillValue)
     : TcpMessage(TcpMessageKind.GameplayResult);
 
+public sealed record GameplayServiceRequestMessage(
+    Guid SessionId,
+    uint RequestId,
+    GameplayServiceKind ServiceKind,
+    string PayloadJson)
+    : TcpMessage(TcpMessageKind.GameplayServiceRequest);
+
+public sealed record GameplayServiceResponseMessage(
+    Guid SessionId,
+    uint RequestId,
+    GameplayServiceKind ServiceKind,
+    bool Success,
+    string PayloadJson,
+    string ErrorText)
+    : TcpMessage(TcpMessageKind.GameplayServiceResponse);
+
+public sealed record GameplayStatePushMessage(
+    Guid SessionId,
+    string PayloadJson)
+    : TcpMessage(TcpMessageKind.GameplayStatePush);
+
 public sealed record ClientInputMessage(Guid SessionId, uint Sequence, NetworkVector3 Move, float DeltaTimeSeconds)
     : UdpMessage(UdpMessageKind.ClientInput);
 
-public sealed record WorldSnapshotMessage(int ZoneId, uint Tick, PlayerSnapshot[] Players, ResourceNodeSnapshot[] ResourceNodes, MobSnapshot[] Mobs)
+public sealed record WorldSnapshotMessage(int ZoneId, uint Tick, PlayerSnapshot[] Players, ResourceNodeSnapshot[] ResourceNodes, MobSnapshot[] Mobs, NpcSnapshot[] Npcs)
     : UdpMessage(UdpMessageKind.WorldSnapshot);
 
 public sealed record TransferProbeMessage(Guid SessionId, string TransferToken)

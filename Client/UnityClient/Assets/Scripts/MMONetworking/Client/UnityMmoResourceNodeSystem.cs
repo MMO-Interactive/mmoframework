@@ -12,6 +12,7 @@ public sealed class UnityMmoResourceNodeSystem : MonoBehaviour
 
     private readonly Dictionary<string, NodeVisual> _nodes = new Dictionary<string, NodeVisual>();
     private readonly HashSet<string> _seenThisSnapshot = new HashSet<string>();
+    private readonly Dictionary<string, ResourceNodeSnapshot> _snapshots = new Dictionary<string, ResourceNodeSnapshot>();
     private Transform _container;
 
     private void Awake()
@@ -58,6 +59,7 @@ public sealed class UnityMmoResourceNodeSystem : MonoBehaviour
                 _nodes[node.NodeId] = visual;
             }
 
+            _snapshots[node.NodeId] = node;
             visual.GameObject.transform.position = new Vector3(node.Position.X, node.Position.Y + 0.65f, node.Position.Z);
             visual.ResourceId = node.ResourceId;
             visual.LastSeenTime = Time.time;
@@ -73,7 +75,53 @@ public sealed class UnityMmoResourceNodeSystem : MonoBehaviour
 
             Destroy(pair.Value.GameObject);
             _nodes.Remove(pair.Key);
+            _snapshots.Remove(pair.Key);
         }
+    }
+
+    public bool TryGetNearestNode(Vector3 position, float maxDistance, out ResourceNodeSnapshot nearestNode)
+    {
+        nearestNode = default;
+        var found = false;
+        var bestDistanceSq = maxDistance * maxDistance;
+
+        foreach (var snapshot in _snapshots.Values)
+        {
+            var nodePosition = new Vector3(snapshot.Position.X, snapshot.Position.Y, snapshot.Position.Z);
+            var distanceSq = (nodePosition - position).sqrMagnitude;
+            if (distanceSq > bestDistanceSq)
+            {
+                continue;
+            }
+
+            bestDistanceSq = distanceSq;
+            nearestNode = snapshot;
+            found = true;
+        }
+
+        return found;
+    }
+
+    public IEnumerable<ResourceNodeSnapshot> GetVisibleNodes()
+        => _snapshots.Values;
+
+    public bool TrySelectNodeFromRay(Ray ray, out ResourceNodeSnapshot node)
+    {
+        node = default;
+        if (!Physics.Raycast(ray, out var hit, 200f))
+        {
+            return false;
+        }
+
+        foreach (var pair in _nodes)
+        {
+            if (pair.Value.GameObject == hit.collider.gameObject)
+            {
+                return _snapshots.TryGetValue(pair.Key, out node);
+            }
+        }
+
+        return false;
     }
 
     private NodeVisual CreateNodeVisual(ResourceNodeSnapshot node)

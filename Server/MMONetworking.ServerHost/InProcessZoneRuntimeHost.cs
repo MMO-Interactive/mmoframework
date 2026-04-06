@@ -15,9 +15,12 @@ public sealed class InProcessZoneRuntimeHost : IZoneRuntimeHost
         SessionRegistry sessionRegistry,
         GhostRegistry ghostRegistry,
         ZoneRuntimeSettings settings,
-        Func<int, CancellationToken, Task> ensureZoneRunningAsync)
+        Func<int, CancellationToken, Task> ensureZoneRunningAsync,
+        GameplayNetworkService gameplayNetworkService,
+        NpcDefinitionSnapshot[] npcDefinitions,
+        MobSpawnDefinitionSnapshot[] mobSpawnDefinitions)
     {
-        _zoneHost = new ZoneHost(definition, zoneDirectory, sessionRegistry, ghostRegistry, settings, ensureZoneRunningAsync);
+        _zoneHost = new ZoneHost(definition, zoneDirectory, sessionRegistry, ghostRegistry, settings, ensureZoneRunningAsync, gameplayNetworkService, npcDefinitions, mobSpawnDefinitions);
     }
 
     public int ActivePlayerCount => _zoneHost.ActivePlayerCount;

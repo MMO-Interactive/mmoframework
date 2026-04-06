@@ -19,6 +19,7 @@ public sealed class GameplayDefinitionStore
         _connectionString = new SqliteConnectionStringBuilder { DataSource = databasePath }.ToString();
         EnsureSchema();
         SeedDefaultsIfEmpty(zoneDirectory);
+        EnsureExpandedSkillCatalog();
     }
 
     public GameplayDefinitionsSnapshot GetSnapshot()
@@ -31,8 +32,55 @@ public sealed class GameplayDefinitionStore
         }
     }
 
+    public NpcDefinitionSnapshot[] GetNpcsForZone(int zoneId)
+        => GetSnapshot()
+            .Npcs
+            .Where(npc => npc.ZoneId == zoneId)
+            .OrderBy(npc => npc.DisplayName, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(npc => npc.NpcId, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    public PlayerSpawnDefinitionSnapshot[] GetPlayerSpawnsForZone(int zoneId)
+        => GetSnapshot()
+            .PlayerSpawns
+            .Where(spawn => spawn.ZoneId == zoneId)
+            .OrderByDescending(spawn => spawn.IsDefaultSpawn)
+            .ThenBy(spawn => spawn.SpawnTag, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(spawn => spawn.SpawnId, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    public MobSpawnDefinitionSnapshot[] GetMobSpawnsForZone(int zoneId)
+        => GetSnapshot()
+            .MobSpawns
+            .Where(spawn => spawn.ZoneId == zoneId)
+            .OrderBy(spawn => spawn.MobTypeId, StringComparer.OrdinalIgnoreCase)
+            .ThenBy(spawn => spawn.SpawnId, StringComparer.OrdinalIgnoreCase)
+            .ToArray();
+
+    public NetworkVector3 GetPreferredPlayerSpawn(int zoneId, ZoneDefinition zone)
+    {
+        var spawn = GetPlayerSpawnsForZone(zoneId).FirstOrDefault(entry => entry.IsDefaultSpawn)
+            ?? GetPlayerSpawnsForZone(zoneId).FirstOrDefault();
+        if (spawn is null)
+        {
+            return new NetworkVector3(zone.MinX + 5f, 0f, zone.MinZ + 5f);
+        }
+
+        return zone.Clamp(new NetworkVector3(spawn.PositionX, spawn.PositionY, spawn.PositionZ));
+    }
+
     public GameplayDefinitionsSnapshot Update(GameplayDefinitionsSnapshot next)
     {
+        next = new GameplayDefinitionsSnapshot(
+            next.Items ?? Array.Empty<ItemDefinitionSnapshot>(),
+            next.Skills ?? Array.Empty<SkillDefinitionSnapshot>(),
+            next.Resources ?? Array.Empty<ResourceDefinitionSnapshot>(),
+            next.Nodes ?? Array.Empty<ResourceNodeDefinitionSnapshot>(),
+            next.Zones ?? Array.Empty<ZoneDefinitionSnapshot>(),
+            next.Npcs ?? Array.Empty<NpcDefinitionSnapshot>(),
+            next.PlayerSpawns ?? Array.Empty<PlayerSpawnDefinitionSnapshot>(),
+            next.MobSpawns ?? Array.Empty<MobSpawnDefinitionSnapshot>());
+
         Validate(next);
 
         lock (_sync)
@@ -45,6 +93,9 @@ public sealed class GameplayDefinitionStore
             UpsertSection(connection, transaction, "resources", next.Resources);
             UpsertSection(connection, transaction, "nodes", next.Nodes);
             UpsertSection(connection, transaction, "zones", next.Zones);
+            UpsertSection(connection, transaction, "npcs", next.Npcs);
+            UpsertSection(connection, transaction, "playerSpawns", next.PlayerSpawns);
+            UpsertSection(connection, transaction, "mobSpawns", next.MobSpawns);
             transaction.Commit();
             return ReadSnapshot(connection);
         }
@@ -99,7 +150,19 @@ public sealed class GameplayDefinitionStore
             },
             Zones: zoneDirectory.All
                 .OrderBy(zone => zone.ZoneId)
-                .Select(zone => new ZoneDefinitionSnapshot(zone.ZoneId, zone.Name, zone.MinX, zone.MaxX, zone.MinZ, zone.MaxZ))
+                .Select(zone => new ZoneDefinitionSnapshot(zone.ZoneId, zone.Name, string.IsNullOrWhiteSpace(zone.AssetBundleName) ? "zone-" + zone.ZoneId : zone.AssetBundleName, zone.MinX, zone.MaxX, zone.MinZ, zone.MaxZ))
+                .ToArray(),
+            Npcs: zoneDirectory.All
+                .OrderBy(zone => zone.ZoneId)
+                .SelectMany(BuildDefaultNpcsForZone)
+                .ToArray(),
+            PlayerSpawns: zoneDirectory.All
+                .OrderBy(zone => zone.ZoneId)
+                .SelectMany(BuildDefaultPlayerSpawnsForZone)
+                .ToArray(),
+            MobSpawns: zoneDirectory.All
+                .OrderBy(zone => zone.ZoneId)
+                .SelectMany(BuildDefaultMobSpawnsForZone)
                 .ToArray());
 
         using var transaction = connection.BeginTransaction();
@@ -108,7 +171,42 @@ public sealed class GameplayDefinitionStore
         UpsertSection(connection, transaction, "resources", defaults.Resources);
         UpsertSection(connection, transaction, "nodes", defaults.Nodes);
         UpsertSection(connection, transaction, "zones", defaults.Zones);
+        UpsertSection(connection, transaction, "npcs", defaults.Npcs);
+        UpsertSection(connection, transaction, "playerSpawns", defaults.PlayerSpawns);
+        UpsertSection(connection, transaction, "mobSpawns", defaults.MobSpawns);
         transaction.Commit();
+    }
+
+    private void EnsureExpandedSkillCatalog()
+    {
+        lock (_sync)
+        {
+            using var connection = new SqliteConnection(_connectionString);
+            connection.Open();
+
+            var existingSkills = ReadSection<SkillDefinitionSnapshot>(connection, "skills");
+            if (existingSkills.Length == 0)
+            {
+                return;
+            }
+
+            var defaultSkills = BuildWurmSkillDefaults();
+            var merged = existingSkills
+                .Concat(defaultSkills)
+                .GroupBy(skill => skill.Id, StringComparer.OrdinalIgnoreCase)
+                .Select(group => group.First())
+                .OrderBy(skill => skill.Name, StringComparer.OrdinalIgnoreCase)
+                .ToArray();
+
+            if (merged.Length == existingSkills.Length)
+            {
+                return;
+            }
+
+            using var transaction = connection.BeginTransaction();
+            UpsertSection(connection, transaction, "skills", merged);
+            transaction.Commit();
+        }
     }
 
     private static SkillDefinitionSnapshot[] BuildWurmSkillDefaults()
@@ -244,7 +342,120 @@ public sealed class GameplayDefinitionStore
             Skills: ReadSection<SkillDefinitionSnapshot>(connection, "skills"),
             Resources: ReadSection<ResourceDefinitionSnapshot>(connection, "resources"),
             Nodes: ReadSection<ResourceNodeDefinitionSnapshot>(connection, "nodes"),
-            Zones: ReadSection<ZoneDefinitionSnapshot>(connection, "zones"));
+            Zones: ReadSection<ZoneDefinitionSnapshot>(connection, "zones"),
+            Npcs: ReadSection<NpcDefinitionSnapshot>(connection, "npcs"),
+            PlayerSpawns: ReadSection<PlayerSpawnDefinitionSnapshot>(connection, "playerSpawns"),
+            MobSpawns: ReadSection<MobSpawnDefinitionSnapshot>(connection, "mobSpawns"));
+
+    private static NpcDefinitionSnapshot[] BuildDefaultNpcsForZone(ZoneDefinition zone)
+    {
+        var midZ = (zone.MinZ + zone.MaxZ) * 0.5f;
+        return new[]
+        {
+            new NpcDefinitionSnapshot(
+                "merchant-" + zone.ZoneId,
+                zone.ZoneId,
+                "merchant",
+                "Quartermaster Rowan",
+                zone.MinX + 22f,
+                0f,
+                midZ - 3f,
+                "shop",
+                new[] { "shop", "crafting" },
+                "Supplies for the road, tools for the trade, and a fair barter if your pack is worth opening.",
+                BuildDefaultServiceOptions("shop", "crafting")),
+            new NpcDefinitionSnapshot(
+                "questgiver-" + zone.ZoneId,
+                zone.ZoneId,
+                "quest_giver",
+                "Warden Elira",
+                zone.MinX + 28f,
+                0f,
+                midZ + 3f,
+                "quest",
+                new[] { "quests" },
+                "Every frontier needs hands willing to work. If you want purpose, I have tasks that matter.",
+                BuildDefaultServiceOptions("quests")),
+            new NpcDefinitionSnapshot(
+                "trainer-" + zone.ZoneId,
+                zone.ZoneId,
+                "trainer",
+                "Master Toren",
+                zone.MinX + 34f,
+                0f,
+                midZ,
+                "trainer",
+                new[] { "training", "progression" },
+                "Skill is earned, not granted. Show me what you've practiced, and I'll show you where to sharpen it next.",
+                BuildDefaultServiceOptions("training"))
+        };
+    }
+
+    private static PlayerSpawnDefinitionSnapshot[] BuildDefaultPlayerSpawnsForZone(ZoneDefinition zone)
+    {
+        var spawnX = zone.MinX + 5f;
+        var spawnZ = zone.MinZ + 5f;
+        return new[]
+        {
+            new PlayerSpawnDefinitionSnapshot(
+                "spawn-" + zone.ZoneId + "-starter",
+                zone.ZoneId,
+                spawnX,
+                0f,
+                spawnZ,
+                true,
+                0f,
+                "starter")
+        };
+    }
+
+    private static MobSpawnDefinitionSnapshot[] BuildDefaultMobSpawnsForZone(ZoneDefinition zone)
+    {
+        var centerX = (zone.MinX + zone.MaxX) * 0.5f;
+        var centerZ = (zone.MinZ + zone.MaxZ) * 0.5f;
+        var baseCount = zone.ZoneId == 1 ? 100 : 2;
+        return new[]
+        {
+            new MobSpawnDefinitionSnapshot(
+                "mob-" + zone.ZoneId + "-pack-a",
+                zone.ZoneId,
+                "wolf",
+                centerX - 10f,
+                0f,
+                centerZ - 8f,
+                Math.Max(1, baseCount / 2),
+                10f,
+                16f),
+            new MobSpawnDefinitionSnapshot(
+                "mob-" + zone.ZoneId + "-pack-b",
+                zone.ZoneId,
+                "boar",
+                centerX + 12f,
+                0f,
+                centerZ + 6f,
+                Math.Max(1, baseCount - Math.Max(1, baseCount / 2)),
+                9f,
+                15f)
+        };
+    }
+
+    private static NpcServiceDefinitionSnapshot[] BuildDefaultServiceOptions(params string[] actions)
+        => actions
+            .Distinct(StringComparer.OrdinalIgnoreCase)
+            .Select(action => action.Trim().ToLowerInvariant())
+            .Where(action => action.Length > 0)
+            .Select(action => action switch
+            {
+                "shop" => new NpcServiceDefinitionSnapshot("shop", "Shop", "Browse merchant stock"),
+                "crafting" => new NpcServiceDefinitionSnapshot("shop", "Shop", "Browse merchant stock"),
+                "quests" => new NpcServiceDefinitionSnapshot("quests", "Quests", "Review available work"),
+                "training" => new NpcServiceDefinitionSnapshot("training", "Training", "Review skill progression"),
+                "progression" => new NpcServiceDefinitionSnapshot("training", "Training", "Review skill progression"),
+                _ => new NpcServiceDefinitionSnapshot(action, action, string.Empty)
+            })
+            .GroupBy(option => option.ActionId, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToArray();
 
     private static T[] ReadSection<T>(SqliteConnection connection, string section)
     {
@@ -298,6 +509,44 @@ public sealed class GameplayDefinitionStore
         if (snapshot.Nodes.Any(node => snapshot.Resources.All(resource => !string.Equals(resource.Id, node.ResourceId, StringComparison.OrdinalIgnoreCase))))
         {
             throw new InvalidOperationException("Every node definition must reference an existing resource id.");
+        }
+
+        if (snapshot.Npcs.GroupBy(npc => npc.NpcId, StringComparer.OrdinalIgnoreCase).Any(group => group.Count() > 1))
+        {
+            throw new InvalidOperationException("Duplicate npc ids are not allowed.");
+        }
+
+        if (snapshot.Npcs.Any(npc => snapshot.Zones.All(zone => zone.ZoneId != npc.ZoneId)))
+        {
+            throw new InvalidOperationException("Every npc definition must reference an existing zone id.");
+        }
+
+        if (snapshot.Npcs.Any(npc =>
+                (npc.ServiceOptions ?? Array.Empty<NpcServiceDefinitionSnapshot>())
+                .GroupBy(option => option.ActionId, StringComparer.OrdinalIgnoreCase)
+                .Any(group => group.Count() > 1)))
+        {
+            throw new InvalidOperationException("NPC service options must not contain duplicate action ids.");
+        }
+
+        if (snapshot.PlayerSpawns.GroupBy(spawn => spawn.SpawnId, StringComparer.OrdinalIgnoreCase).Any(group => group.Count() > 1))
+        {
+            throw new InvalidOperationException("Duplicate player spawn ids are not allowed.");
+        }
+
+        if (snapshot.PlayerSpawns.Any(spawn => snapshot.Zones.All(zone => zone.ZoneId != spawn.ZoneId)))
+        {
+            throw new InvalidOperationException("Every player spawn definition must reference an existing zone id.");
+        }
+
+        if (snapshot.MobSpawns.GroupBy(spawn => spawn.SpawnId, StringComparer.OrdinalIgnoreCase).Any(group => group.Count() > 1))
+        {
+            throw new InvalidOperationException("Duplicate mob spawn ids are not allowed.");
+        }
+
+        if (snapshot.MobSpawns.Any(spawn => snapshot.Zones.All(zone => zone.ZoneId != spawn.ZoneId)))
+        {
+            throw new InvalidOperationException("Every mob spawn definition must reference an existing zone id.");
         }
     }
 

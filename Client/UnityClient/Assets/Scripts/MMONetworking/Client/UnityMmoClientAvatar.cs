@@ -12,9 +12,13 @@ public sealed class UnityMmoClientAvatar : MonoBehaviour
     public void Bind(UnityMmoClient targetClient)
     {
         client = targetClient;
+        if (client != null)
+        {
+            transform.position = client.AuthoritativePosition;
+        }
     }
 
-    private void Update()
+    private void LateUpdate()
     {
         if (client == null)
         {

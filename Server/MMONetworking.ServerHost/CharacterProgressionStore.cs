@@ -115,34 +115,15 @@ public sealed class CharacterProgressionStore
     {
         using var connection = new SqliteConnection(_connectionString);
         connection.Open();
-        using var command = connection.CreateCommand();
-        command.CommandText =
-            """
-            CREATE TABLE IF NOT EXISTS character_progression (
-                account_id TEXT NOT NULL,
-                character_id INTEGER NULL,
-                track_id TEXT NOT NULL,
-                level INTEGER NOT NULL,
-                experience INTEGER NOT NULL,
-                updated_at_utc TEXT NOT NULL,
-                PRIMARY KEY (account_id, track_id)
-            );
-            """;
-        command.ExecuteNonQuery();
-
-        using (var migrate = connection.CreateCommand())
+        if (!TableExists(connection, "character_progression"))
         {
-            migrate.CommandText =
-                """
-                UPDATE character_progression
-                SET character_id = (
-                    SELECT primary_character_id
-                    FROM accounts
-                    WHERE accounts.account_id = character_progression.account_id
-                )
-                WHERE character_id IS NULL;
-                """;
-            migrate.ExecuteNonQuery();
+            CreateCharacterScopedProgressionTable(connection, "character_progression");
+            return;
+        }
+
+        if (ColumnExists(connection, "character_progression", "account_id"))
+        {
+            MigrateLegacyAccountScopedTable(connection);
         }
 
         using (var index = connection.CreateCommand())
@@ -150,5 +131,90 @@ public sealed class CharacterProgressionStore
             index.CommandText = "CREATE UNIQUE INDEX IF NOT EXISTS ix_character_progression_character_track ON character_progression(character_id, track_id);";
             index.ExecuteNonQuery();
         }
+    }
+
+    private static void MigrateLegacyAccountScopedTable(SqliteConnection connection)
+    {
+        CreateCharacterScopedProgressionTable(connection, "character_progression_v2");
+
+        using (var migrate = connection.CreateCommand())
+        {
+            migrate.CommandText =
+                """
+                INSERT OR REPLACE INTO character_progression_v2(character_id, track_id, level, experience, updated_at_utc)
+                SELECT resolved.character_id, resolved.track_id, resolved.level, resolved.experience, resolved.updated_at_utc
+                FROM (
+                    SELECT
+                        CASE
+                            WHEN character_progression.character_id IS NOT NULL THEN character_progression.character_id
+                            ELSE (
+                                SELECT primary_character_id
+                                FROM accounts
+                                WHERE accounts.account_id = character_progression.account_id
+                            )
+                        END AS character_id,
+                        character_progression.track_id,
+                        character_progression.level,
+                        character_progression.experience,
+                        character_progression.updated_at_utc
+                    FROM character_progression
+                ) AS resolved
+                WHERE resolved.character_id IS NOT NULL;
+                """;
+            migrate.ExecuteNonQuery();
+        }
+
+        using (var dropLegacy = connection.CreateCommand())
+        {
+            dropLegacy.CommandText = "DROP TABLE character_progression;";
+            dropLegacy.ExecuteNonQuery();
+        }
+
+        using (var rename = connection.CreateCommand())
+        {
+            rename.CommandText = "ALTER TABLE character_progression_v2 RENAME TO character_progression;";
+            rename.ExecuteNonQuery();
+        }
+    }
+
+    private static void CreateCharacterScopedProgressionTable(SqliteConnection connection, string tableName)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            $"""
+            CREATE TABLE IF NOT EXISTS {tableName} (
+                character_id INTEGER NOT NULL,
+                track_id TEXT NOT NULL,
+                level INTEGER NOT NULL,
+                experience INTEGER NOT NULL,
+                updated_at_utc TEXT NOT NULL,
+                PRIMARY KEY (character_id, track_id)
+            );
+            """;
+        command.ExecuteNonQuery();
+    }
+
+    private static bool TableExists(SqliteConnection connection, string tableName)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = $name LIMIT 1;";
+        command.Parameters.AddWithValue("$name", tableName);
+        return command.ExecuteScalar() != null;
+    }
+
+    private static bool ColumnExists(SqliteConnection connection, string tableName, string columnName)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"PRAGMA table_info({tableName});";
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            if (string.Equals(reader.GetString(1), columnName, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
     }
 }

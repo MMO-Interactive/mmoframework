@@ -62,17 +62,43 @@
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoCameraFollow.cs" />
+    <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoSpellEffectSystem.cs" />
+    <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoNpcSystem.cs" />
     <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoClient.cs" />
+    <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoGameplayPanel.cs" />
+    <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoClientAppBootstrap.cs" />
+    <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoLoginSceneController.cs" />
+    <Compile Include="Assets\Scripts\VoxelDemo\VoxelDemoFlyCamera.cs" />
+    <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoWorldSceneController.cs" />
+    <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoCharacterCreationSceneController.cs" />
+    <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoAssetBundleService.cs" />
     <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoRemoteAvatarSystem.cs" />
     <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoClientSceneBootstrap.cs" />
+    <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoGameplayApiModels.cs" />
+    <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoCharacterSelectionSceneController.cs" />
+    <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoUmaAvatarFactory.cs" />
+    <Compile Include="Assets\Scripts\MMONetworking\Shared\IsExternalInit.cs" />
     <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoClientStatusView.cs" />
     <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoResourceNodeSystem.cs" />
     <Compile Include="Assets\Scripts\MMONetworking\Shared\Primitives.cs" />
+    <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoMinimapView.cs" />
     <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoMobSystem.cs" />
+    <Compile Include="Assets\Scripts\VoxelDemo\VoxelDemoBootstrap.cs" />
+    <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoWorldInteractionController.cs" />
     <Compile Include="Assets\Scripts\MMONetworking\Shared\WireProtocol.cs" />
+    <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoWorldTrackerView.cs" />
+    <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoSceneInstaller.cs" />
     <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoClientAvatar.cs" />
     <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoMaterialFactory.cs" />
+    <Compile Include="Assets\Scripts\MMONetworking\Client\UnityMmoSceneNames.cs" />
     <Compile Include="Assets\Scripts\MMONetworking\Shared\Messages.cs" />
+  </ItemGroup>
+  <ItemGroup>
+    <None Include="Assets\UMA\InternalDataStore\InGame\Resources\Shader\NormalShader.compute" />
+    <None Include="Assets\UMA\InternalDataStore\InGame\Resources\PlaceholderAssets\PlaceholderAssetsREADME.txt" />
+    <None Include="Assets\UMA\InternalDataStore\AssetVersion.xml" />
+    <None Include="Assets\UMA\Whats New in UMA.txt" />
+    <None Include="Assets\UMA\InternalDataStore\InGame\Resources\Shader\Combiner.compute" />
   </ItemGroup>
   <ItemGroup>
     <Reference Include="UnityEngine">
@@ -545,6 +571,10 @@
     </Reference>
     <Reference Include="ReportGeneratorMerged">
       <HintPath>Library\PackageCache\com.unity.testtools.codecoverage\lib\ReportGenerator\ReportGeneratorMerged.dll</HintPath>
+      <Private>False</Private>
+    </Reference>
+    <Reference Include="VoxelLibrary">
+      <HintPath>Assets\Plugins\VoxelLibrary\VoxelLibrary.dll</HintPath>
       <Private>False</Private>
     </Reference>
     <Reference Include="Unity.VisualScripting.Antlr3.Runtime">
@@ -1145,6 +1175,34 @@
     </Reference>
   </ItemGroup>
   <ItemGroup>
+    <ProjectReference Include="UMA_Examples.csproj">
+      <Project>{E16DDFC0-3D74-F85B-BF62-16772CEA473A}</Project>
+      <Name>UMA_Examples</Name>
+    </ProjectReference>
+    <ProjectReference Include="UMA_Content.csproj">
+      <Project>{F9BED69E-1065-EA45-2134-6B6E3C76CE08}</Project>
+      <Name>UMA_Content</Name>
+    </ProjectReference>
+    <ProjectReference Include="UMA_Core_Editor.csproj">
+      <Project>{C9A3F316-C919-2BE8-C0D9-DE39DD5694EE}</Project>
+      <Name>UMA_Core_Editor</Name>
+    </ProjectReference>
+    <ProjectReference Include="UMA_Examples_Editor.csproj">
+      <Project>{711C6B0B-7EF1-1628-F265-88A2E2B194BE}</Project>
+      <Name>UMA_Examples_Editor</Name>
+    </ProjectReference>
+    <ProjectReference Include="UMA_Core.csproj">
+      <Project>{36E42CBF-7250-177C-23A8-B36C1A383746}</Project>
+      <Name>UMA_Core</Name>
+    </ProjectReference>
+    <ProjectReference Include="Shaderpackager-editor.csproj">
+      <Project>{5344F7C5-E216-D9D2-5FDF-D4AE4D31E09D}</Project>
+      <Name>Shaderpackager-editor</Name>
+    </ProjectReference>
+    <ProjectReference Include="Addressable_Editor.csproj">
+      <Project>{372EE248-0A8A-FB90-75BB-320852BC877A}</Project>
+      <Name>Addressable_Editor</Name>
+    </ProjectReference>
   </ItemGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
   <Target Name="GenerateTargetFrameworkMonikerAttribute" />

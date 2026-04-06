@@ -11,6 +11,7 @@ public sealed class UnityMmoRemoteAvatarSystem : MonoBehaviour
 
     private readonly Dictionary<ulong, RemoteAvatar> _avatars = new Dictionary<ulong, RemoteAvatar>();
     private readonly HashSet<ulong> _seenThisFrame = new HashSet<ulong>();
+    private readonly Dictionary<ulong, PlayerSnapshot> _snapshots = new Dictionary<ulong, PlayerSnapshot>();
 
     private void Awake()
     {
@@ -46,6 +47,7 @@ public sealed class UnityMmoRemoteAvatarSystem : MonoBehaviour
             }
 
             _seenThisFrame.Add(player.PlayerId);
+            _snapshots[player.PlayerId] = player;
             if (!_avatars.TryGetValue(player.PlayerId, out var avatar))
             {
                 avatar = CreateAvatar(player.PlayerId);
@@ -74,6 +76,7 @@ public sealed class UnityMmoRemoteAvatarSystem : MonoBehaviour
             {
                 Destroy(pair.Value.GameObject);
                 _avatars.Remove(pair.Key);
+                _snapshots.Remove(pair.Key);
             }
         }
     }
@@ -91,10 +94,15 @@ public sealed class UnityMmoRemoteAvatarSystem : MonoBehaviour
 
     private RemoteAvatar CreateAvatar(ulong playerId)
     {
-        var gameObject = GameObject.CreatePrimitive(PrimitiveType.Cube);
-        gameObject.name = "Remote Avatar " + playerId;
-        gameObject.transform.localScale = new Vector3(0.9f, 1.8f, 0.9f);
-        var renderer = gameObject.GetComponent<Renderer>();
+        GameObject gameObject;
+        Renderer renderer = null;
+        if (!UnityMmoUmaAvatarFactory.TryCreateAvatar("Remote Avatar " + playerId, playerId, out gameObject))
+        {
+            gameObject = GameObject.CreatePrimitive(PrimitiveType.Cube);
+            gameObject.name = "Remote Avatar " + playerId;
+            gameObject.transform.localScale = new Vector3(0.9f, 1.8f, 0.9f);
+            renderer = gameObject.GetComponent<Renderer>();
+        }
 
         var avatar = new RemoteAvatar
         {
@@ -120,6 +128,28 @@ public sealed class UnityMmoRemoteAvatarSystem : MonoBehaviour
         {
             UnityMmoMaterialFactory.Apply(avatar.Renderer, isGhost ? ghostPlayerColor : remotePlayerColor);
         }
+    }
+
+    public IEnumerable<PlayerSnapshot> GetVisibleRemotePlayers()
+        => _snapshots.Values;
+
+    public bool TrySelectPlayerFromRay(Ray ray, out PlayerSnapshot player)
+    {
+        player = default;
+        if (!Physics.Raycast(ray, out var hit, 200f))
+        {
+            return false;
+        }
+
+        foreach (var pair in _avatars)
+        {
+            if (hit.collider.transform.IsChildOf(pair.Value.GameObject.transform))
+            {
+                return _snapshots.TryGetValue(pair.Key, out player);
+            }
+        }
+
+        return false;
     }
 
     private sealed class RemoteAvatar

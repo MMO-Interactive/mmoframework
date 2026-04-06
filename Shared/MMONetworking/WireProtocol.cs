@@ -8,7 +8,7 @@ namespace MMONetworking;
 
 public static class WireProtocol
 {
-    public const int CurrentProtocolVersion = 2;
+    public const int CurrentProtocolVersion = 7;
 
     public static async Task WriteTcpMessageAsync(Stream stream, TcpMessage message, CancellationToken cancellationToken = default)
     {
@@ -73,6 +73,7 @@ public static class WireProtocol
                 writer.Write(accepted.ZoneTcpPort);
                 writer.Write(accepted.ZoneUdpPort);
                 writer.Write(accepted.TransferToken);
+                writer.Write(accepted.ZoneBundleName);
                 writer.Write(accepted.SnapshotRateHz);
                 break;
             case AttachToZoneMessage attach:
@@ -94,6 +95,7 @@ public static class WireProtocol
                 writer.Write(transferPrepare.ZoneTcpPort);
                 writer.Write(transferPrepare.ZoneUdpPort);
                 writer.Write(transferPrepare.TransferToken);
+                writer.Write(transferPrepare.ZoneBundleName);
                 WriteVector3(writer, transferPrepare.SpawnPosition);
                 break;
             case ZoneTransferCommittedMessage transferCommitted:
@@ -111,6 +113,20 @@ public static class WireProtocol
                 writer.Write(disconnect.Reason);
                 writer.Write(disconnect.CanReconnect);
                 writer.Write(disconnect.GraceSeconds);
+                break;
+            case AccountServiceRequestMessage accountServiceRequest:
+                writer.Write(accountServiceRequest.RequestId);
+                writer.Write((byte)accountServiceRequest.ServiceKind);
+                writer.Write(accountServiceRequest.AccountName);
+                writer.Write(accountServiceRequest.Password);
+                writer.Write(accountServiceRequest.PayloadJson);
+                break;
+            case AccountServiceResponseMessage accountServiceResponse:
+                writer.Write(accountServiceResponse.RequestId);
+                writer.Write((byte)accountServiceResponse.ServiceKind);
+                writer.Write(accountServiceResponse.Success);
+                writer.Write(accountServiceResponse.PayloadJson);
+                writer.Write(accountServiceResponse.ErrorText);
                 break;
             case ZoneAttachAuthorizeMessage authorize:
                 WriteGuid(writer, authorize.SessionId);
@@ -145,6 +161,7 @@ public static class WireProtocol
                 writer.Write(transferResponse.ZoneTcpPort);
                 writer.Write(transferResponse.ZoneUdpPort);
                 writer.Write(transferResponse.TransferToken);
+                writer.Write(transferResponse.ZoneBundleName);
                 WriteVector3(writer, transferResponse.SpawnPosition);
                 writer.Write(transferResponse.ErrorText);
                 break;
@@ -183,6 +200,14 @@ public static class WireProtocol
                     WriteVector3(writer, player.Velocity);
                 }
                 break;
+            case ZoneGameplayRewardMessage gameplayReward:
+                WriteGuid(writer, gameplayReward.SessionId);
+                writer.Write(gameplayReward.ItemId);
+                writer.Write(gameplayReward.ItemQuantity);
+                writer.Write(gameplayReward.MaxStack);
+                writer.Write(gameplayReward.SkillTrackId);
+                writer.Write(gameplayReward.SkillExperience);
+                break;
             case GameplayCommandMessage gameplayCommand:
                 WriteGuid(writer, gameplayCommand.SessionId);
                 writer.Write(gameplayCommand.CommandId);
@@ -197,6 +222,24 @@ public static class WireProtocol
                 writer.Write(gameplayResult.ItemId);
                 writer.Write(gameplayResult.ItemCount);
                 writer.Write(gameplayResult.SkillValue);
+                break;
+            case GameplayServiceRequestMessage gameplayServiceRequest:
+                WriteGuid(writer, gameplayServiceRequest.SessionId);
+                writer.Write(gameplayServiceRequest.RequestId);
+                writer.Write((byte)gameplayServiceRequest.ServiceKind);
+                writer.Write(gameplayServiceRequest.PayloadJson);
+                break;
+            case GameplayServiceResponseMessage gameplayServiceResponse:
+                WriteGuid(writer, gameplayServiceResponse.SessionId);
+                writer.Write(gameplayServiceResponse.RequestId);
+                writer.Write((byte)gameplayServiceResponse.ServiceKind);
+                writer.Write(gameplayServiceResponse.Success);
+                writer.Write(gameplayServiceResponse.PayloadJson);
+                writer.Write(gameplayServiceResponse.ErrorText);
+                break;
+            case GameplayStatePushMessage gameplayStatePush:
+                WriteGuid(writer, gameplayStatePush.SessionId);
+                writer.Write(gameplayStatePush.PayloadJson);
                 break;
             default:
                 throw new InvalidDataException($"Unsupported TCP message type {message.GetType().Name}.");
@@ -221,6 +264,7 @@ public static class WireProtocol
                 reader.ReadInt32(),
                 reader.ReadInt32(),
                 reader.ReadString(),
+                reader.ReadString(),
                 reader.ReadInt32()),
             TcpMessageKind.AttachToZone => new AttachToZoneMessage(
                 ReadGuid(reader),
@@ -239,6 +283,7 @@ public static class WireProtocol
                 reader.ReadInt32(),
                 reader.ReadInt32(),
                 reader.ReadString(),
+                reader.ReadString(),
                 ReadVector3(reader)),
             TcpMessageKind.ZoneTransferCommitted => new ZoneTransferCommittedMessage(
                 ReadGuid(reader),
@@ -250,6 +295,18 @@ public static class WireProtocol
                 reader.ReadString(),
                 reader.ReadBoolean(),
                 reader.ReadInt32()),
+            TcpMessageKind.AccountServiceRequest => new AccountServiceRequestMessage(
+                reader.ReadUInt32(),
+                (AccountServiceKind)reader.ReadByte(),
+                reader.ReadString(),
+                reader.ReadString(),
+                reader.ReadString()),
+            TcpMessageKind.AccountServiceResponse => new AccountServiceResponseMessage(
+                reader.ReadUInt32(),
+                (AccountServiceKind)reader.ReadByte(),
+                reader.ReadBoolean(),
+                reader.ReadString(),
+                reader.ReadString()),
             TcpMessageKind.ZoneAttachAuthorize => new ZoneAttachAuthorizeMessage(
                 ReadGuid(reader),
                 reader.ReadUInt64(),
@@ -279,6 +336,7 @@ public static class WireProtocol
                 reader.ReadInt32(),
                 reader.ReadInt32(),
                 reader.ReadString(),
+                reader.ReadString(),
                 ReadVector3(reader),
                 reader.ReadString()),
             TcpMessageKind.ZonePrewarmRequest => new ZonePrewarmRequestMessage(
@@ -293,6 +351,13 @@ public static class WireProtocol
                 reader.ReadString()),
             TcpMessageKind.ZoneMobStateUpdate => ReadZoneMobStateUpdate(reader),
             TcpMessageKind.ZoneStateBatchUpdate => ReadZoneStateBatchUpdate(reader),
+            TcpMessageKind.ZoneGameplayReward => new ZoneGameplayRewardMessage(
+                ReadGuid(reader),
+                reader.ReadString(),
+                reader.ReadInt32(),
+                reader.ReadInt32(),
+                reader.ReadString(),
+                reader.ReadInt32()),
             TcpMessageKind.GameplayCommand => new GameplayCommandMessage(
                 ReadGuid(reader),
                 reader.ReadUInt32(),
@@ -306,6 +371,21 @@ public static class WireProtocol
                 reader.ReadString(),
                 reader.ReadInt32(),
                 reader.ReadInt32()),
+            TcpMessageKind.GameplayServiceRequest => new GameplayServiceRequestMessage(
+                ReadGuid(reader),
+                reader.ReadUInt32(),
+                (GameplayServiceKind)reader.ReadByte(),
+                reader.ReadString()),
+            TcpMessageKind.GameplayServiceResponse => new GameplayServiceResponseMessage(
+                ReadGuid(reader),
+                reader.ReadUInt32(),
+                (GameplayServiceKind)reader.ReadByte(),
+                reader.ReadBoolean(),
+                reader.ReadString(),
+                reader.ReadString()),
+            TcpMessageKind.GameplayStatePush => new GameplayStatePushMessage(
+                ReadGuid(reader),
+                reader.ReadString()),
             _ => throw new InvalidDataException($"Unsupported TCP message kind {kind}.")
         };
     }
@@ -349,7 +429,32 @@ public static class WireProtocol
                     WriteVector3(writer, mob.Position);
                     WriteVector3(writer, mob.Velocity);
                     writer.Write(mob.State);
+                    writer.Write(mob.HitPoints);
+                    writer.Write(mob.MaxHitPoints);
                 }
+
+                writer.Write(snapshot.Npcs.Length);
+                foreach (var npc in snapshot.Npcs)
+                {
+                    writer.Write(npc.NpcId);
+                    writer.Write(npc.NpcTypeId);
+                    writer.Write(npc.DisplayName);
+                    WriteVector3(writer, npc.Position);
+                    writer.Write(npc.PrimaryRole);
+                    writer.Write(npc.Services.Length);
+                foreach (var service in npc.Services)
+                {
+                    writer.Write(service);
+                }
+                writer.Write(npc.GreetingText);
+                writer.Write(npc.ServiceOptions.Length);
+                foreach (var option in npc.ServiceOptions)
+                {
+                    writer.Write(option.ActionId);
+                    writer.Write(option.Label);
+                    writer.Write(option.UiHint);
+                }
+            }
 
                 break;
             case TransferProbeMessage probe:
@@ -422,10 +527,49 @@ public static class WireProtocol
                 reader.ReadString(),
                 ReadVector3(reader),
                 ReadVector3(reader),
-                reader.ReadString());
+                reader.ReadString(),
+                reader.ReadInt32(),
+                reader.ReadInt32());
         }
 
-        return new WorldSnapshotMessage(zoneId, tick, players, nodes, mobs);
+        var npcCount = reader.ReadInt32();
+        var npcs = new NpcSnapshot[npcCount];
+        for (var i = 0; i < npcCount; i++)
+        {
+            var npcId = reader.ReadString();
+            var npcTypeId = reader.ReadString();
+            var displayName = reader.ReadString();
+            var position = ReadVector3(reader);
+            var primaryRole = reader.ReadString();
+            var serviceCount = reader.ReadInt32();
+            var services = new string[serviceCount];
+            for (var serviceIndex = 0; serviceIndex < serviceCount; serviceIndex++)
+            {
+                services[serviceIndex] = reader.ReadString();
+            }
+            var greetingText = reader.ReadString();
+            var optionCount = reader.ReadInt32();
+            var serviceOptions = new NpcServiceSnapshot[optionCount];
+            for (var optionIndex = 0; optionIndex < optionCount; optionIndex++)
+            {
+                serviceOptions[optionIndex] = new NpcServiceSnapshot(
+                    reader.ReadString(),
+                    reader.ReadString(),
+                    reader.ReadString());
+            }
+
+            npcs[i] = new NpcSnapshot(
+                npcId,
+                npcTypeId,
+                displayName,
+                position,
+                primaryRole,
+                services,
+                greetingText,
+                serviceOptions);
+        }
+
+        return new WorldSnapshotMessage(zoneId, tick, players, nodes, mobs, npcs);
     }
 
     private static ZoneMobStateUpdateMessage ReadZoneMobStateUpdate(BinaryReader reader)
@@ -440,7 +584,9 @@ public static class WireProtocol
                 reader.ReadString(),
                 ReadVector3(reader),
                 ReadVector3(reader),
-                reader.ReadString());
+                reader.ReadString(),
+                reader.ReadInt32(),
+                reader.ReadInt32());
         }
 
         return new ZoneMobStateUpdateMessage(zoneId, mobs);

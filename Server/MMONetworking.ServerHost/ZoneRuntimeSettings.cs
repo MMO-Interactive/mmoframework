@@ -16,7 +16,10 @@ public sealed record ZoneRuntimeSettings(
     TimeSpan IdleShutdownDelay,
     int ZoneControlPort,
     bool UseUnityZoneProcess,
-    string UnityZoneExecutablePath)
+    string UnityZoneExecutablePath,
+    string AssetApiBaseUrl,
+    string AssetChannel,
+    string AssetPlatform)
 {
     public static ZoneRuntimeSettings Load(string workspaceRoot)
         => new(
@@ -34,7 +37,10 @@ public sealed record ZoneRuntimeSettings(
             ZoneControlPort: ReadInt("MMO_ZONE_CONTROL_PORT", 7050),
             UseUnityZoneProcess: ReadBool("MMO_USE_UNITY_ZONE_PROCESS", false),
             UnityZoneExecutablePath: Environment.GetEnvironmentVariable("MMO_UNITY_ZONE_EXE")
-                ?? System.IO.Path.Combine(workspaceRoot, "Builds", "ZoneServer", "Win64", "ZoneServer.exe"));
+                ?? System.IO.Path.Combine(workspaceRoot, "Builds", "ZoneServer", "Win64", "ZoneServer.exe"),
+            AssetApiBaseUrl: (Environment.GetEnvironmentVariable("MMO_ASSET_API_BASE_URL") ?? "http://127.0.0.1:7095").TrimEnd('/'),
+            AssetChannel: (Environment.GetEnvironmentVariable("MMO_ASSET_CHANNEL") ?? "live").Trim(),
+            AssetPlatform: (Environment.GetEnvironmentVariable("MMO_ASSET_PLATFORM") ?? "windows").Trim());
 
     public int GetMobCountForZone(int zoneId)
         => zoneId == 1 ? Math.Max(0, Zone1MobCount) : Math.Max(0, DefaultMobCountPerZone);

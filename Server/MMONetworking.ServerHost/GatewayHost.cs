@@ -2,6 +2,7 @@ using System;
 using System.IO;
 using System.Net;
 using System.Net.Sockets;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using MMONetworking;
@@ -15,19 +16,21 @@ public sealed class GatewayHost
     private readonly SessionRegistry _sessionRegistry;
     private readonly ZoneSupervisor _zoneSupervisor;
     private readonly ModerationStore _moderationStore;
+    private readonly GameplayDefinitionStore _gameplayDefinitions;
     private readonly TcpListener _listener;
     private long _connectionAttempts;
     private long _successfulLogins;
     private long _errors;
     private readonly int _port;
 
-    public GatewayHost(AccountStore accountStore, ZoneDirectory zoneDirectory, SessionRegistry sessionRegistry, ZoneSupervisor zoneSupervisor, ModerationStore moderationStore, int port)
+    public GatewayHost(AccountStore accountStore, ZoneDirectory zoneDirectory, SessionRegistry sessionRegistry, ZoneSupervisor zoneSupervisor, ModerationStore moderationStore, GameplayDefinitionStore gameplayDefinitions, int port)
     {
         _accountStore = accountStore;
         _zoneDirectory = zoneDirectory;
         _sessionRegistry = sessionRegistry;
         _zoneSupervisor = zoneSupervisor;
         _moderationStore = moderationStore;
+        _gameplayDefinitions = gameplayDefinitions;
         _port = port;
         _listener = new TcpListener(IPAddress.Any, port);
     }
@@ -60,6 +63,12 @@ public sealed class GatewayHost
             await using (var stream = tcpClient.GetStream())
             {
                 var message = await WireProtocol.ReadTcpMessageAsync(stream, cancellationToken).ConfigureAwait(false);
+                if (message is AccountServiceRequestMessage accountServiceRequest)
+                {
+                    await HandleAccountServiceRequestAsync(stream, accountServiceRequest, cancellationToken).ConfigureAwait(false);
+                    return;
+                }
+
                 if (message is not ClientHelloMessage hello)
                 {
                     await WireProtocol.WriteTcpMessageAsync(stream, new ErrorMessage("Expected ClientHello."), cancellationToken).ConfigureAwait(false);
@@ -105,7 +114,7 @@ public sealed class GatewayHost
                     await WireProtocol.WriteTcpMessageAsync(stream, new ErrorMessage("Zone startup failed: " + ex.Message), cancellationToken).ConfigureAwait(false);
                     return;
                 }
-                var spawn = new NetworkVector3(zone.MinX + 5f, 0f, zone.MinZ + 5f);
+                var spawn = _gameplayDefinitions.GetPreferredPlayerSpawn(zone.ZoneId, zone);
                 var session = _sessionRegistry.CreateSession(authResult.AccountId, authResult.AccountName, authResult.CharacterId, zone.ZoneId, spawn);
                 var token = _sessionRegistry.IssueTransferToken(session.SessionId, zone.ZoneId, spawn);
 
@@ -117,6 +126,7 @@ public sealed class GatewayHost
                     zone.TcpPort,
                     zone.UdpPort,
                     token,
+                    zone.AssetBundleName,
                     SnapshotRateHz: 20);
 
                 await WireProtocol.WriteTcpMessageAsync(stream, accepted, cancellationToken).ConfigureAwait(false);
@@ -133,4 +143,62 @@ public sealed class GatewayHost
             Console.WriteLine($"Gateway client error: {ex}");
         }
     }
+
+    private async Task HandleAccountServiceRequestAsync(NetworkStream stream, AccountServiceRequestMessage request, CancellationToken cancellationToken)
+    {
+        try
+        {
+            var response = request.ServiceKind switch
+            {
+                AccountServiceKind.CharacterList => new AccountServiceResponseMessage(
+                    request.RequestId,
+                    request.ServiceKind,
+                    true,
+                    JsonSerializer.Serialize(_accountStore.GetCharacterList(request.AccountName, request.Password), JsonOptions),
+                    string.Empty),
+                AccountServiceKind.CharacterCreate => HandleCreateCharacter(request),
+                AccountServiceKind.CharacterSelect => HandleSelectCharacter(request),
+                _ => new AccountServiceResponseMessage(request.RequestId, request.ServiceKind, false, string.Empty, "Unsupported account service request.")
+            };
+
+            await WireProtocol.WriteTcpMessageAsync(stream, response, cancellationToken).ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            await WireProtocol.WriteTcpMessageAsync(
+                stream,
+                new AccountServiceResponseMessage(request.RequestId, request.ServiceKind, false, string.Empty, ex.Message),
+                cancellationToken).ConfigureAwait(false);
+        }
+    }
+
+    private AccountServiceResponseMessage HandleCreateCharacter(AccountServiceRequestMessage request)
+    {
+        var payload = JsonSerializer.Deserialize<CharacterCreatePayload>(request.PayloadJson, JsonOptions) ?? new CharacterCreatePayload();
+        var result = _accountStore.CreateCharacter(request.AccountName, request.Password, payload.CharacterName ?? string.Empty);
+        return new AccountServiceResponseMessage(request.RequestId, request.ServiceKind, true, JsonSerializer.Serialize(result, JsonOptions), string.Empty);
+    }
+
+    private AccountServiceResponseMessage HandleSelectCharacter(AccountServiceRequestMessage request)
+    {
+        var payload = JsonSerializer.Deserialize<CharacterSelectPayload>(request.PayloadJson, JsonOptions) ?? new CharacterSelectPayload();
+        var result = _accountStore.SelectCharacter(request.AccountName, request.Password, payload.CharacterId);
+        return new AccountServiceResponseMessage(request.RequestId, request.ServiceKind, true, JsonSerializer.Serialize(result, JsonOptions), string.Empty);
+    }
+
+    private sealed class CharacterCreatePayload
+    {
+        public string CharacterName { get; set; } = string.Empty;
+    }
+
+    private sealed class CharacterSelectPayload
+    {
+        public ulong CharacterId { get; set; }
+    }
+
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        PropertyNameCaseInsensitive = true
+    };
 }

@@ -13,18 +13,22 @@ public sealed class ZoneSupervisor
     private readonly SessionRegistry _sessionRegistry;
     private readonly GhostRegistry _ghostRegistry;
     private readonly ZoneRuntimeSettings _settings;
+    private readonly GameplayNetworkService _gameplayNetworkService;
+    private readonly GameplayDefinitionStore _gameplayDefinitions;
     private readonly ConcurrentDictionary<int, ManagedZone> _zones = new();
 
-    public ZoneSupervisor(ZoneDirectory zoneDirectory, SessionRegistry sessionRegistry, GhostRegistry ghostRegistry, ZoneRuntimeSettings settings)
+    public ZoneSupervisor(ZoneDirectory zoneDirectory, SessionRegistry sessionRegistry, GhostRegistry ghostRegistry, ZoneRuntimeSettings settings, GameplayNetworkService gameplayNetworkService, GameplayDefinitionStore gameplayDefinitions)
     {
         _zoneDirectory = zoneDirectory;
         _sessionRegistry = sessionRegistry;
         _ghostRegistry = ghostRegistry;
         _settings = settings;
+        _gameplayNetworkService = gameplayNetworkService;
+        _gameplayDefinitions = gameplayDefinitions;
 
         foreach (var zone in zoneDirectory.All)
         {
-            _zones[zone.ZoneId] = new ManagedZone(zone, EnsureRunningAsync, ghostRegistry, settings);
+            _zones[zone.ZoneId] = new ManagedZone(zone, EnsureRunningAsync, ghostRegistry, settings, gameplayNetworkService, gameplayDefinitions);
         }
     }
 
@@ -79,16 +83,20 @@ public sealed class ZoneSupervisor
         private readonly Func<int, CancellationToken, Task> _ensureZoneRunningAsync;
         private readonly GhostRegistry _ghostRegistry;
         private readonly ZoneRuntimeSettings _settings;
+        private readonly GameplayNetworkService _gameplayNetworkService;
+        private readonly GameplayDefinitionStore _gameplayDefinitions;
         private IZoneRuntimeHost? _host;
         private CancellationTokenSource? _runCancellation;
         private Task? _runTask;
 
-        public ManagedZone(ZoneDefinition definition, Func<int, CancellationToken, Task> ensureZoneRunningAsync, GhostRegistry ghostRegistry, ZoneRuntimeSettings settings)
+        public ManagedZone(ZoneDefinition definition, Func<int, CancellationToken, Task> ensureZoneRunningAsync, GhostRegistry ghostRegistry, ZoneRuntimeSettings settings, GameplayNetworkService gameplayNetworkService, GameplayDefinitionStore gameplayDefinitions)
         {
             Definition = definition;
             _ensureZoneRunningAsync = ensureZoneRunningAsync;
             _ghostRegistry = ghostRegistry;
             _settings = settings;
+            _gameplayNetworkService = gameplayNetworkService;
+            _gameplayDefinitions = gameplayDefinitions;
             LifecycleState = "Stopped";
             LastStateChangeUtc = DateTimeOffset.UtcNow;
         }
@@ -227,12 +235,14 @@ public sealed class ZoneSupervisor
 
         private IZoneRuntimeHost CreateRuntimeHost(ZoneDirectory zoneDirectory, SessionRegistry sessionRegistry)
         {
+            var npcDefinitions = _gameplayDefinitions.GetNpcsForZone(Definition.ZoneId);
+            var mobSpawnDefinitions = _gameplayDefinitions.GetMobSpawnsForZone(Definition.ZoneId);
             if (_settings.UseUnityZoneProcess)
             {
-                return new ExternalUnityZoneProcessHost(Definition, _settings);
+                return new ExternalUnityZoneProcessHost(Definition, _settings, npcDefinitions, mobSpawnDefinitions);
             }
 
-            return new InProcessZoneRuntimeHost(Definition, zoneDirectory, sessionRegistry, _ghostRegistry, _settings, _ensureZoneRunningAsync);
+            return new InProcessZoneRuntimeHost(Definition, zoneDirectory, sessionRegistry, _ghostRegistry, _settings, _ensureZoneRunningAsync, _gameplayNetworkService, npcDefinitions, mobSpawnDefinitions);
         }
 
         public void ReportPlayerState(Guid sessionId, ulong playerId, NetworkVector3 position, NetworkVector3 velocity)

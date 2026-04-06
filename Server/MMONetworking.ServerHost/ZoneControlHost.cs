@@ -13,15 +13,17 @@ public sealed class ZoneControlHost
     private readonly ZoneDirectory _zoneDirectory;
     private readonly SessionRegistry _sessionRegistry;
     private readonly ZoneSupervisor _zoneSupervisor;
+    private readonly GameplayNetworkService _gameplayNetworkService;
     private readonly ZoneRuntimeSettings _settings;
     private readonly TcpListener _listener;
     private readonly int _port;
 
-    public ZoneControlHost(ZoneDirectory zoneDirectory, SessionRegistry sessionRegistry, ZoneSupervisor zoneSupervisor, ZoneRuntimeSettings settings, int port)
+    public ZoneControlHost(ZoneDirectory zoneDirectory, SessionRegistry sessionRegistry, ZoneSupervisor zoneSupervisor, GameplayNetworkService gameplayNetworkService, ZoneRuntimeSettings settings, int port)
     {
         _zoneDirectory = zoneDirectory;
         _sessionRegistry = sessionRegistry;
         _zoneSupervisor = zoneSupervisor;
+        _gameplayNetworkService = gameplayNetworkService;
         _settings = settings;
         _port = port;
         _listener = new TcpListener(IPAddress.Any, port);
@@ -72,6 +74,12 @@ public sealed class ZoneControlHost
                     case ZoneMobStateUpdateMessage mobStateUpdate:
                         _zoneSupervisor.ReportExternalMobStates(mobStateUpdate.ZoneId, mobStateUpdate.Mobs);
                         await WireProtocol.WriteTcpMessageAsync(stream, new HeartbeatMessage(Environment.TickCount64), cancellationToken).ConfigureAwait(false);
+                        return;
+                    case ZoneGameplayRewardMessage gameplayReward:
+                        await HandleGameplayRewardAsync(stream, gameplayReward, cancellationToken).ConfigureAwait(false);
+                        return;
+                    case GameplayServiceRequestMessage gameplayServiceRequest:
+                        await HandleGameplayServiceRequestAsync(stream, gameplayServiceRequest, cancellationToken).ConfigureAwait(false);
                         return;
                     case ZoneTransferRequestMessage transferRequest:
                         await HandleTransferRequestAsync(stream, transferRequest, cancellationToken).ConfigureAwait(false);
@@ -127,7 +135,7 @@ public sealed class ZoneControlHost
         {
             await WireProtocol.WriteTcpMessageAsync(
                 stream,
-                new ZoneTransferResponseMessage(false, request.SessionId, request.ZoneId, request.ZoneId, string.Empty, 0, 0, string.Empty, currentZone.Clamp(request.Position), string.Empty),
+                new ZoneTransferResponseMessage(false, request.SessionId, request.ZoneId, request.ZoneId, string.Empty, 0, 0, string.Empty, string.Empty, currentZone.Clamp(request.Position), string.Empty),
                 cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -136,7 +144,7 @@ public sealed class ZoneControlHost
         {
             await WireProtocol.WriteTcpMessageAsync(
                 stream,
-                new ZoneTransferResponseMessage(false, request.SessionId, request.ZoneId, request.ZoneId, string.Empty, 0, 0, string.Empty, request.Position, "Session not found."),
+                new ZoneTransferResponseMessage(false, request.SessionId, request.ZoneId, request.ZoneId, string.Empty, 0, 0, string.Empty, string.Empty, request.Position, "Session not found."),
                 cancellationToken).ConfigureAwait(false);
             return;
         }
@@ -158,9 +166,44 @@ public sealed class ZoneControlHost
                 destination.TcpPort,
                 destination.UdpPort,
                 token,
+                destination.AssetBundleName,
                 spawn,
                 string.Empty),
             cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task HandleGameplayRewardAsync(Stream stream, ZoneGameplayRewardMessage request, CancellationToken cancellationToken)
+    {
+        if (!_sessionRegistry.TryGet(request.SessionId, out var session) || session is null)
+        {
+            await WireProtocol.WriteTcpMessageAsync(stream, new ErrorMessage("Session not found for gameplay reward."), cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        _gameplayNetworkService.PersistGameplayReward(
+            session.PlayerId,
+            request.ItemId,
+            request.ItemQuantity,
+            request.MaxStack,
+            request.SkillTrackId,
+            request.SkillExperience);
+
+        await WireProtocol.WriteTcpMessageAsync(stream, new HeartbeatMessage(Environment.TickCount64), cancellationToken).ConfigureAwait(false);
+    }
+
+    private async Task HandleGameplayServiceRequestAsync(Stream stream, GameplayServiceRequestMessage request, CancellationToken cancellationToken)
+    {
+        if (!_sessionRegistry.TryGet(request.SessionId, out var session) || session is null)
+        {
+            await WireProtocol.WriteTcpMessageAsync(
+                stream,
+                new GameplayServiceResponseMessage(request.SessionId, request.RequestId, request.ServiceKind, false, string.Empty, "Session not found."),
+                cancellationToken).ConfigureAwait(false);
+            return;
+        }
+
+        var response = _gameplayNetworkService.Handle(request.SessionId, session.PlayerId, request.RequestId, request.ServiceKind, request.PayloadJson);
+        await WireProtocol.WriteTcpMessageAsync(stream, response, cancellationToken).ConfigureAwait(false);
     }
 
     private NetworkVector3 CalculateTransferSpawn(ZoneDefinition current, ZoneDefinition destination, NetworkVector3 currentPosition)
@@ -227,4 +270,5 @@ public sealed class ZoneControlHost
             new ZonePrewarmResponseMessage(true, request.SessionId, request.ZoneId, resolvedDestination.ZoneId, string.Empty),
             cancellationToken).ConfigureAwait(false);
     }
+
 }

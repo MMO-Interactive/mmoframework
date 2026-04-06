@@ -21,20 +21,32 @@ public static class Program
         var zoneDirectory = new ZoneDirectory(zones);
         var sessionRegistry = new SessionRegistry();
         var ghostRegistry = new GhostRegistry();
+        var gameplayDefinitions = new GameplayDefinitionStore(databasePath, zoneDirectory);
         var accountStore = new AccountStore(databasePath);
         var moderationStore = new ModerationStore(databasePath);
         var inventoryStore = new InventoryStore(databasePath);
         var craftingStore = new CraftingStore(databasePath);
+        var shopStore = new ShopStore(databasePath);
         var progressionStore = new CharacterProgressionStore(databasePath);
         var combatStore = new CombatStore(databasePath);
         var reputationStore = new ReputationStore(databasePath);
         var questStore = new QuestStore(databasePath);
         var worldEventStore = new WorldEventStore(databasePath);
         var invasionStore = new InvasionStore(databasePath);
-        var zoneSupervisor = new ZoneSupervisor(zoneDirectory, sessionRegistry, ghostRegistry, runtimeSettings);
-        var gateway = new GatewayHost(accountStore, zoneDirectory, sessionRegistry, zoneSupervisor, moderationStore, port: 7000);
-        var zoneControl = new ZoneControlHost(zoneDirectory, sessionRegistry, zoneSupervisor, runtimeSettings, port: runtimeSettings.ZoneControlPort);
-        var gameplayDefinitions = new GameplayDefinitionStore(databasePath, zoneDirectory);
+        var gameplayNetworkService = new GameplayNetworkService(
+            inventoryStore,
+            craftingStore,
+            shopStore,
+            progressionStore,
+            combatStore,
+            reputationStore,
+            questStore,
+            worldEventStore,
+            invasionStore,
+            gameplayDefinitions);
+        var zoneSupervisor = new ZoneSupervisor(zoneDirectory, sessionRegistry, ghostRegistry, runtimeSettings, gameplayNetworkService, gameplayDefinitions);
+        var gateway = new GatewayHost(accountStore, zoneDirectory, sessionRegistry, zoneSupervisor, moderationStore, gameplayDefinitions, port: 7000);
+        var zoneControl = new ZoneControlHost(zoneDirectory, sessionRegistry, zoneSupervisor, gameplayNetworkService, runtimeSettings, port: runtimeSettings.ZoneControlPort);
         var dashboard = new ManagementDashboardHost(accountStore, gateway, sessionRegistry, zoneSupervisor, gameplayDefinitions, moderationStore, inventoryStore, craftingStore, progressionStore, combatStore, reputationStore, questStore, worldEventStore, invasionStore, port: 7080);
 
         using var cancellation = new CancellationTokenSource();
@@ -99,8 +111,8 @@ public static class Program
 
         return new[]
         {
-            CreateZoneDefinition(1, "NorthField", 0f, 100f, 0f, 100f),
-            CreateZoneDefinition(2, "SouthField", 100f, 200f, 0f, 100f)
+            CreateZoneDefinition(1, "NorthField", 0f, ZoneDefinition.StandardZoneSizeMeters, 0f, ZoneDefinition.StandardZoneSizeMeters, "zone-1"),
+            CreateZoneDefinition(2, "SouthField", ZoneDefinition.StandardZoneSizeMeters, ZoneDefinition.StandardZoneSizeMeters * 2f, 0f, ZoneDefinition.StandardZoneSizeMeters, "zone-2")
         };
     }
 
@@ -125,11 +137,11 @@ public static class Program
         var zones = JsonSerializer.Deserialize<ZoneDefinitionSnapshot[]>(payload, JsonOptions) ?? Array.Empty<ZoneDefinitionSnapshot>();
         return zones
             .OrderBy(zone => zone.ZoneId)
-            .Select(zone => CreateZoneDefinition(zone.ZoneId, zone.Name, zone.MinX, zone.MaxX, zone.MinZ, zone.MaxZ))
+            .Select(zone => CreateZoneDefinition(zone.ZoneId, zone.Name, zone.MinX, zone.MaxX, zone.MinZ, zone.MaxZ, zone.ZoneAssetBundle))
             .ToArray();
     }
 
-    private static ZoneDefinition CreateZoneDefinition(int zoneId, string name, float minX, float maxX, float minZ, float maxZ)
+    private static ZoneDefinition CreateZoneDefinition(int zoneId, string name, float minX, float maxX, float minZ, float maxZ, string assetBundleName)
         => new(
             zoneId,
             name,
@@ -139,7 +151,8 @@ public static class Program
             MinX: minX,
             MaxX: maxX,
             MinZ: minZ,
-            MaxZ: maxZ);
+            MaxZ: maxZ,
+            AssetBundleName: assetBundleName ?? string.Empty);
 
     private static readonly JsonSerializerOptions JsonOptions = new()
     {

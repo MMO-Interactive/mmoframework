@@ -1,9 +1,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Net;
-using System.Net.Http;
 using System.Net.Sockets;
-using System.Text;
 using System.Threading;
 using System.Threading.Tasks;
 using UnityEngine;
@@ -12,15 +10,17 @@ namespace MMONetworking.Client
 {
 public sealed class UnityMmoClient : MonoBehaviour
 {
+    private static readonly TimeSpan GameplayServiceTimeout = TimeSpan.FromSeconds(5);
+    private static readonly TimeSpan AccountServiceTimeout = TimeSpan.FromSeconds(5);
     [Header("Gateway")]
     [SerializeField] private string gatewayHost = "127.0.0.1";
     [SerializeField] private int gatewayTcpPort = 7000;
-    [SerializeField] private int dashboardHttpPort = 7080;
     [SerializeField] private string accountId = "player-local";
     [SerializeField] private string password = "changeme123";
     [SerializeField] private AccountAuthMode authMode = AccountAuthMode.Login;
     [SerializeField] private int requestedZoneId = 1;
     [SerializeField] private bool connectOnStart = false;
+    [SerializeField] private UnityMmoAssetBundleService assetBundleService;
 
     public Guid SessionId { get; private set; }
     public ulong PlayerId { get; private set; }
@@ -30,7 +30,18 @@ public sealed class UnityMmoClient : MonoBehaviour
     public string StatusText { get; private set; }
     public double LastHeartbeatRttMs { get; private set; }
     public double HeartbeatJitterMs { get; private set; }
+    public string AssetBundleStatus => assetBundleService != null ? assetBundleService.StatusText : string.Empty;
     public CharacterOption[] Characters { get; private set; } = Array.Empty<CharacterOption>();
+    public InventorySnapshotData Inventory { get; private set; }
+    public ShopCatalogData ShopCatalog { get; private set; }
+    public NpcContextData NpcContext { get; private set; }
+    public CraftingRecipeData[] CraftingRecipes { get; private set; } = Array.Empty<CraftingRecipeData>();
+    public CharacterProgressionData Progression { get; private set; }
+    public CombatSnapshotData Combat { get; private set; }
+    public ReputationProfileData Reputation { get; private set; }
+    public QuestBoardData QuestBoard { get; private set; }
+    public WorldEventBoardData WorldEvents { get; private set; }
+    public InvasionBoardData Invasions { get; private set; }
     public string AccountId
     {
         get => accountId;
@@ -44,18 +55,24 @@ public sealed class UnityMmoClient : MonoBehaviour
     }
 
     public bool IsConnected => _activeConnection != null;
+    public ulong CurrentCharacterId => SelectedCharacterId != 0 ? SelectedCharacterId : PlayerId;
     public event Action<WorldSnapshotMessage> SnapshotReceived;
+    public event Action<GameplayResultMessage> GameplayResultReceived;
 
     private readonly ConcurrentQueue<Action> _mainThreadActions = new ConcurrentQueue<Action>();
     private readonly SemaphoreSlim _connectionSwapLock = new SemaphoreSlim(1, 1);
-    private static readonly HttpClient SharedHttpClient = new HttpClient();
+    private readonly ConcurrentDictionary<uint, TaskCompletionSource<GameplayServiceResponseMessage>> _pendingGameplayServiceRequests = new ConcurrentDictionary<uint, TaskCompletionSource<GameplayServiceResponseMessage>>();
     private CancellationTokenSource _sessionCancellation;
     private ZoneConnection _activeConnection;
     private uint _inputSequence;
     private uint _gameplayCommandSequence;
+    private uint _gameplayServiceRequestSequence;
+    private uint _accountServiceRequestSequence;
 
     private async void Start()
     {
+        EnsureAssetBundleService();
+
         StatusText = "Idle";
         if (connectOnStart)
         {
@@ -133,10 +150,60 @@ public sealed class UnityMmoClient : MonoBehaviour
     public Task RegisterAsync()
         => ConnectAsync(AccountAuthMode.Register);
 
+    public async Task<bool> TryRefreshCharactersAsync()
+    {
+        await RefreshCharactersAsync();
+        return Characters.Length > 0;
+    }
+
+    public async Task<bool> TryCreateCharacterAsync(string characterName)
+    {
+        var beforeCount = Characters.Length;
+        await CreateCharacterAsync(characterName);
+        return Characters.Length > beforeCount || SelectedCharacterId != 0;
+    }
+
+    public async Task<bool> TrySelectCharacterAsync(ulong characterId)
+    {
+        await SelectCharacterAsync(characterId);
+        return SelectedCharacterId == characterId;
+    }
+
+    public async Task<bool> TryLoginAndConnectAsync()
+    {
+        await LoginAsync();
+        return IsConnected;
+    }
+
+    public async Task<bool> TryRegisterAndPrepareAccountAsync()
+    {
+        await RegisterAsync();
+        if (!IsConnected)
+        {
+            return false;
+        }
+
+        await DisconnectAsync();
+        await RefreshCharactersAsync();
+        return Characters.Length > 0;
+    }
+
+    public async Task<bool> TrySelectCharacterAndLoginAsync(ulong characterId)
+    {
+        var selected = await TrySelectCharacterAsync(characterId);
+        if (!selected)
+        {
+            return false;
+        }
+
+        return await TryLoginAndConnectAsync();
+    }
+
     public async Task ConnectAsync(AccountAuthMode mode)
     {
         try
         {
+            EnsureAssetBundleService();
             await DisconnectAsync();
             _sessionCancellation = new CancellationTokenSource();
             StatusText = mode == AccountAuthMode.Register
@@ -175,6 +242,7 @@ public sealed class UnityMmoClient : MonoBehaviour
                         accepted.ZoneTcpPort,
                         accepted.ZoneUdpPort,
                         accepted.TransferToken,
+                        accepted.ZoneBundleName,
                         0,
                         accepted.ZoneId,
                         _sessionCancellation.Token).ConfigureAwait(false);
@@ -203,6 +271,8 @@ public sealed class UnityMmoClient : MonoBehaviour
             previous.Dispose();
         }
 
+        CancelPendingGameplayRequests("Disconnected.");
+
         StatusText = "Disconnected";
         return Task.CompletedTask;
     }
@@ -211,11 +281,9 @@ public sealed class UnityMmoClient : MonoBehaviour
     {
         try
         {
-            var response = await PostCharacterApiAsync("/api/accounts/characters/list", new CharacterApiRequest
-            {
-                accountName = accountId.Trim(),
-                password = password
-            }).ConfigureAwait(false);
+            var response = await SendAccountServiceRequestAsync<EmptyRequest, AccountCharacterListResponse>(
+                AccountServiceKind.CharacterList,
+                EmptyRequest.Instance).ConfigureAwait(false);
 
             ApplyCharacterResponse(response);
             StatusText = "Loaded " + Characters.Length + " characters.";
@@ -231,12 +299,9 @@ public sealed class UnityMmoClient : MonoBehaviour
     {
         try
         {
-            var response = await PostCharacterApiAsync("/api/accounts/characters/create", new CharacterApiRequest
-            {
-                accountName = accountId.Trim(),
-                password = password,
-                characterName = characterName
-            }).ConfigureAwait(false);
+            var response = await SendAccountServiceRequestAsync<CharacterCreateRequest, AccountCharacterListResponse>(
+                AccountServiceKind.CharacterCreate,
+                new CharacterCreateRequest { characterName = characterName }).ConfigureAwait(false);
 
             ApplyCharacterResponse(response);
             StatusText = "Created character " + characterName + ".";
@@ -252,15 +317,360 @@ public sealed class UnityMmoClient : MonoBehaviour
     {
         try
         {
-            var response = await PostCharacterApiAsync("/api/accounts/characters/select", new CharacterApiRequest
-            {
-                accountName = accountId.Trim(),
-                password = password,
-                characterId = characterId
-            }).ConfigureAwait(false);
+            var response = await SendAccountServiceRequestAsync<CharacterSelectRequest, AccountCharacterListResponse>(
+                AccountServiceKind.CharacterSelect,
+                new CharacterSelectRequest { characterId = characterId }).ConfigureAwait(false);
 
             ApplyCharacterResponse(response);
             StatusText = "Selected character " + characterId + ".";
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            Debug.LogException(ex);
+        }
+    }
+
+    public async Task RefreshInventoryAsync()
+    {
+        try
+        {
+            Inventory = await RequestGameplayServiceAsync<EmptyRequest, InventorySnapshotData>(GameplayServiceKind.Inventory, EmptyRequest.Instance).ConfigureAwait(false);
+            StatusText = "Loaded inventory.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            Debug.LogException(ex);
+        }
+    }
+
+    public async Task RefreshCraftingRecipesAsync()
+    {
+        try
+        {
+            CraftingRecipes = await RequestGameplayServiceArrayAsync<EmptyRequest, CraftingRecipeData>(GameplayServiceKind.CraftingRecipes, EmptyRequest.Instance).ConfigureAwait(false);
+            StatusText = "Loaded " + CraftingRecipes.Length + " recipes.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            Debug.LogException(ex);
+        }
+    }
+
+    public async Task RefreshShopCatalogAsync(string npcId)
+    {
+        try
+        {
+            ShopCatalog = await RequestGameplayServiceAsync<ShopCatalogRequest, ShopCatalogData>(
+                GameplayServiceKind.ShopCatalog,
+                new ShopCatalogRequest { npcId = npcId }).ConfigureAwait(false);
+            StatusText = "Loaded merchant stock.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            Debug.LogException(ex);
+        }
+    }
+
+    public async Task RefreshNpcContextAsync(string npcId)
+    {
+        try
+        {
+            NpcContext = await RequestGameplayServiceAsync<NpcContextRequest, NpcContextData>(
+                GameplayServiceKind.NpcContext,
+                new NpcContextRequest { npcId = npcId }).ConfigureAwait(false);
+            StatusText = "Loaded NPC context.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            Debug.LogException(ex);
+        }
+    }
+
+    public async Task PurchaseShopOfferAsync(string offerId)
+    {
+        try
+        {
+            var result = await RequestGameplayServiceAsync<ShopPurchaseRequest, ShopPurchaseData>(
+                GameplayServiceKind.ShopPurchase,
+                new ShopPurchaseRequest { offerId = offerId }).ConfigureAwait(false);
+            Inventory = result.inventory;
+            StatusText = result.message;
+            if (ShopCatalog != null && !string.IsNullOrWhiteSpace(ShopCatalog.npcId))
+            {
+                await RefreshShopCatalogAsync(ShopCatalog.npcId).ConfigureAwait(false);
+            }
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            Debug.LogException(ex);
+        }
+    }
+
+    public async Task ExecuteRecipeAsync(string recipeId)
+    {
+        try
+        {
+            var result = await RequestGameplayServiceAsync<CraftingExecuteRequest, CraftingResultData>(
+                GameplayServiceKind.CraftRecipe,
+                new CraftingExecuteRequest { recipeId = recipeId }).ConfigureAwait(false);
+            Inventory = result.inventory;
+            StatusText = !string.IsNullOrWhiteSpace(result.message)
+                ? result.message
+                : (result.success ? "Craft complete." : "Craft failed.");
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            Debug.LogException(ex);
+        }
+    }
+
+    public async Task RefreshProgressionAsync()
+    {
+        try
+        {
+            Progression = await RequestGameplayServiceAsync<EmptyRequest, CharacterProgressionData>(GameplayServiceKind.Progression, EmptyRequest.Instance).ConfigureAwait(false);
+            StatusText = "Loaded progression.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            Debug.LogException(ex);
+        }
+    }
+
+    public async Task RefreshCombatAsync()
+    {
+        try
+        {
+            Combat = await RequestGameplayServiceAsync<EmptyRequest, CombatSnapshotData>(GameplayServiceKind.CombatSnapshot, EmptyRequest.Instance).ConfigureAwait(false);
+            StatusText = "Loaded combat state.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            Debug.LogException(ex);
+        }
+    }
+
+    public async Task EnsureCombatAsync()
+    {
+        try
+        {
+            Combat = await RequestGameplayServiceAsync<CombatEnsureRequest, CombatSnapshotData>(
+                GameplayServiceKind.CombatEnsure,
+                new CombatEnsureRequest()).ConfigureAwait(false);
+            StatusText = "Combat profile ready.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            Debug.LogException(ex);
+        }
+    }
+
+    public async Task AttackCharacterAsync(ulong targetCharacterId, int baseDamage = 10)
+    {
+        try
+        {
+            Combat = await RequestGameplayServiceAsync<CombatAttackRequest, CombatSnapshotData>(
+                GameplayServiceKind.CombatAttack,
+                new CombatAttackRequest
+                {
+                    targetCharacterId = targetCharacterId,
+                    baseDamage = baseDamage <= 0 ? 10 : baseDamage
+                }).ConfigureAwait(false);
+            StatusText = "Attack resolved.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            Debug.LogException(ex);
+        }
+    }
+
+    public async Task RefreshReputationAsync()
+    {
+        try
+        {
+            Reputation = await RequestGameplayServiceAsync<EmptyRequest, ReputationProfileData>(GameplayServiceKind.Reputation, EmptyRequest.Instance).ConfigureAwait(false);
+            StatusText = "Loaded reputation.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            Debug.LogException(ex);
+        }
+    }
+
+    public async Task RefreshQuestBoardAsync()
+    {
+        try
+        {
+            QuestBoard = await RequestGameplayServiceAsync<EmptyRequest, QuestBoardData>(GameplayServiceKind.QuestBoard, EmptyRequest.Instance).ConfigureAwait(false);
+            StatusText = "Loaded quests.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            Debug.LogException(ex);
+        }
+    }
+
+    public async Task ExecuteQuestActionAsync(string actionId)
+    {
+        try
+        {
+            QuestBoard = await RequestGameplayServiceAsync<QuestActionRequest, QuestBoardData>(
+                GameplayServiceKind.QuestAction,
+                new QuestActionRequest { actionId = actionId, amount = 1 }).ConfigureAwait(false);
+            StatusText = "Quest action recorded.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            Debug.LogException(ex);
+        }
+    }
+
+    public async Task ClaimQuestAsync(string questId)
+    {
+        try
+        {
+            var result = await RequestGameplayServiceAsync<QuestClaimRequest, QuestClaimData>(
+                GameplayServiceKind.QuestClaim,
+                new QuestClaimRequest { questId = questId }).ConfigureAwait(false);
+            StatusText = result.message;
+            await RefreshAllGameplayAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            Debug.LogException(ex);
+        }
+    }
+
+    public async Task RefreshWorldEventsAsync()
+    {
+        try
+        {
+            WorldEvents = await RequestGameplayServiceAsync<EmptyRequest, WorldEventBoardData>(GameplayServiceKind.WorldEvents, EmptyRequest.Instance).ConfigureAwait(false);
+            StatusText = "Loaded world events.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            Debug.LogException(ex);
+        }
+    }
+
+    public async Task ContributeWorldEventAsync(string eventId)
+    {
+        try
+        {
+            WorldEvents = await RequestGameplayServiceAsync<WorldEventContributionRequest, WorldEventBoardData>(
+                GameplayServiceKind.WorldEventContribute,
+                new WorldEventContributionRequest { eventId = eventId, amount = 1 }).ConfigureAwait(false);
+            StatusText = "Contributed to event.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            Debug.LogException(ex);
+        }
+    }
+
+    public async Task ClaimWorldEventAsync(string eventId)
+    {
+        try
+        {
+            var result = await RequestGameplayServiceAsync<WorldEventClaimRequest, WorldEventClaimData>(
+                GameplayServiceKind.WorldEventClaim,
+                new WorldEventClaimRequest { eventId = eventId }).ConfigureAwait(false);
+            StatusText = result.message;
+            await RefreshAllGameplayAsync().ConfigureAwait(false);
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            Debug.LogException(ex);
+        }
+    }
+
+    public async Task RefreshInvasionsAsync()
+    {
+        try
+        {
+            Invasions = await RequestGameplayServiceAsync<EmptyRequest, InvasionBoardData>(GameplayServiceKind.Invasions, EmptyRequest.Instance).ConfigureAwait(false);
+            StatusText = "Loaded invasions.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            Debug.LogException(ex);
+        }
+    }
+
+    public async Task RefreshAllGameplayAsync()
+    {
+        try
+        {
+            var bundle = await RequestGameplayServiceAsync<EmptyRequest, GameplayBundleData>(
+                GameplayServiceKind.FullState,
+                EmptyRequest.Instance).ConfigureAwait(false);
+            ApplyGameplayBundle(bundle);
+            StatusText = "Loaded gameplay state.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            Debug.LogException(ex);
+        }
+    }
+
+    public Task ExecuteGatherAsync(string nodeId)
+        => SendGatherCommandAsync(nodeId);
+
+    public Task ExecuteMobAttackAsync(string mobId)
+        => SendAttackCommandAsync(mobId);
+
+    public Task CastFireballAsync(string mobId)
+        => SendCastSpellCommandAsync("fireball:" + mobId);
+
+    public Task InspectInventoryAsync()
+        => SendInspectInventoryAsync();
+
+    public async Task RecordInvasionKillAsync(string invasionId)
+    {
+        try
+        {
+            Invasions = await RequestGameplayServiceAsync<InvasionRecordKillRequest, InvasionBoardData>(
+                GameplayServiceKind.InvasionRecordKill,
+                new InvasionRecordKillRequest { invasionId = invasionId, kills = 1 }).ConfigureAwait(false);
+            StatusText = "Recorded invasion kill.";
+        }
+        catch (Exception ex)
+        {
+            StatusText = ex.Message;
+            Debug.LogException(ex);
+        }
+    }
+
+    public async Task ClaimInvasionAsync(string invasionId)
+    {
+        try
+        {
+            var result = await RequestGameplayServiceAsync<InvasionClaimRequest, InvasionClaimData>(
+                GameplayServiceKind.InvasionClaim,
+                new InvasionClaimRequest { invasionId = invasionId }).ConfigureAwait(false);
+            StatusText = result.message;
+            await RefreshAllGameplayAsync().ConfigureAwait(false);
         }
         catch (Exception ex)
         {
@@ -293,7 +703,7 @@ public sealed class UnityMmoClient : MonoBehaviour
         }
     }
 
-    private async Task ReplaceZoneConnectionAsync(string zoneHost, int zoneTcpPort, int zoneUdpPort, string transferToken, int previousZoneId, int newZoneId, CancellationToken cancellationToken)
+    private async Task ReplaceZoneConnectionAsync(string zoneHost, int zoneTcpPort, int zoneUdpPort, string transferToken, string zoneBundleName, int previousZoneId, int newZoneId, CancellationToken cancellationToken)
     {
         await _connectionSwapLock.WaitAsync(cancellationToken).ConfigureAwait(false);
         try
@@ -304,6 +714,7 @@ public sealed class UnityMmoClient : MonoBehaviour
             StartConnectionLoops(next);
             if (prior != null)
             {
+                CancelPendingGameplayRequests("Zone connection replaced.");
                 _ = Task.Run(async () =>
                 {
                     try
@@ -323,6 +734,18 @@ public sealed class UnityMmoClient : MonoBehaviour
             CurrentZoneId = newZoneId;
             AuthoritativePosition = next.SpawnPosition;
             StatusText = "Connected to zone " + newZoneId + " (G tree / H ore / I inventory)";
+            EnsureAssetBundleService();
+            if (assetBundleService != null)
+            {
+                var zoneIdToLoad = newZoneId;
+                var bundleNameToLoad = zoneBundleName;
+                Debug.Log("Queueing zone bundle load for zone " + zoneIdToLoad + " bundle '" + (string.IsNullOrWhiteSpace(bundleNameToLoad) ? "<empty>" : bundleNameToLoad) + "'.");
+                _mainThreadActions.Enqueue(() => assetBundleService.BeginEnsureZoneBundle(zoneIdToLoad, bundleNameToLoad));
+            }
+            else
+            {
+                Debug.LogWarning("UnityMmoAssetBundleService was not found when attaching to zone " + newZoneId + ".");
+            }
 
             if (previousZoneId != 0 && previousZoneId != newZoneId)
             {
@@ -443,6 +866,7 @@ public sealed class UnityMmoClient : MonoBehaviour
                         prepare.ZoneTcpPort,
                         prepare.ZoneUdpPort,
                         prepare.TransferToken,
+                        prepare.ZoneBundleName,
                         prepare.FromZoneId,
                         prepare.ToZoneId,
                         _sessionCancellation != null ? _sessionCancellation.Token : connection.Cancellation.Token).ConfigureAwait(false);
@@ -480,20 +904,50 @@ public sealed class UnityMmoClient : MonoBehaviour
                     continue;
                 }
 
+                var gameplayServiceResponse = message as GameplayServiceResponseMessage;
+                if (gameplayServiceResponse != null)
+                {
+                    if (_pendingGameplayServiceRequests.TryRemove(gameplayServiceResponse.RequestId, out var pendingRequest))
+                    {
+                        pendingRequest.TrySetResult(gameplayServiceResponse);
+                    }
+                    continue;
+                }
+
+                var gameplayStatePush = message as GameplayStatePushMessage;
+                if (gameplayStatePush != null && gameplayStatePush.SessionId == SessionId)
+                {
+                    try
+                    {
+                        var bundle = JsonUtility.FromJson<GameplayBundleData>(gameplayStatePush.PayloadJson);
+                        _mainThreadActions.Enqueue(() => ApplyGameplayBundle(bundle));
+                    }
+                    catch (Exception ex)
+                    {
+                        Debug.LogException(ex);
+                    }
+                    continue;
+                }
+
                 var gameplayResult = message as GameplayResultMessage;
                 if (gameplayResult != null)
                 {
                     _mainThreadActions.Enqueue(() =>
-                        StatusText = gameplayResult.Text + " | " + gameplayResult.ItemId + ": " + gameplayResult.ItemCount + " | Gathering " + gameplayResult.SkillValue);
+                    {
+                        StatusText = gameplayResult.Text + " | " + gameplayResult.ItemId + ": " + gameplayResult.ItemCount + " | Gathering " + gameplayResult.SkillValue;
+                        GameplayResultReceived?.Invoke(gameplayResult);
+                    });
                 }
             }
         }
         catch (OperationCanceledException)
         {
+            CancelPendingGameplayRequests("Control connection canceled.");
         }
         catch (Exception ex)
         {
             Debug.LogException(ex);
+            CancelPendingGameplayRequests("Control connection error.");
             _mainThreadActions.Enqueue(() => StatusText = "Control connection error");
         }
     }
@@ -597,27 +1051,188 @@ public sealed class UnityMmoClient : MonoBehaviour
         Characters = response.characters ?? Array.Empty<CharacterOption>();
     }
 
-    private async Task<AccountCharacterListResponse> PostCharacterApiAsync(string path, CharacterApiRequest payload)
+    private void ApplyGameplayBundle(GameplayBundleData bundle)
     {
-        var url = "http://" + gatewayHost + ":" + dashboardHttpPort + path;
-        var json = JsonUtility.ToJson(payload);
-        using (var content = new StringContent(json, Encoding.UTF8, "application/json"))
-        using (var response = await SharedHttpClient.PostAsync(url, content).ConfigureAwait(false))
+        if (bundle == null)
         {
-            var body = await response.Content.ReadAsStringAsync().ConfigureAwait(false);
-            if (!response.IsSuccessStatusCode)
+            return;
+        }
+
+        Inventory = bundle.inventory;
+        CraftingRecipes = bundle.craftingRecipes ?? Array.Empty<CraftingRecipeData>();
+        Progression = bundle.progression;
+        Combat = bundle.combat;
+        Reputation = bundle.reputation;
+        QuestBoard = bundle.questBoard;
+        WorldEvents = bundle.worldEvents;
+        Invasions = bundle.invasions;
+    }
+
+    private void EnsureAssetBundleService()
+    {
+        if (assetBundleService == null)
+        {
+            assetBundleService = FindObjectOfType<UnityMmoAssetBundleService>();
+        }
+    }
+
+    private void CancelPendingGameplayRequests(string reason)
+    {
+        foreach (var pair in _pendingGameplayServiceRequests.ToArray())
+        {
+            if (_pendingGameplayServiceRequests.TryRemove(pair.Key, out var pending))
             {
-                var error = JsonUtility.FromJson<ErrorEnvelope>(body);
-                throw new InvalidOperationException(error != null && !string.IsNullOrWhiteSpace(error.error) ? error.error : "Character request failed.");
+                pending.TrySetException(new InvalidOperationException(reason));
+            }
+        }
+    }
+
+    private async Task<TResponse> RequestGameplayServiceAsync<TRequest, TResponse>(GameplayServiceKind serviceKind, TRequest payload)
+        where TResponse : class
+    {
+        var connection = _activeConnection;
+        if (connection == null)
+        {
+            throw new InvalidOperationException("Not connected to a zone.");
+        }
+
+        var requestId = ++_gameplayServiceRequestSequence;
+        var pendingRequest = new TaskCompletionSource<GameplayServiceResponseMessage>(TaskCreationOptions.RunContinuationsAsynchronously);
+        if (!_pendingGameplayServiceRequests.TryAdd(requestId, pendingRequest))
+        {
+            throw new InvalidOperationException("Failed to allocate gameplay service request.");
+        }
+
+        try
+        {
+            await connection.SendControlMessageAsync(
+                new GameplayServiceRequestMessage(
+                    SessionId,
+                    requestId,
+                    serviceKind,
+                    payload != null ? JsonUtility.ToJson(payload) : "{}")).ConfigureAwait(false);
+
+            var completedTask = await Task.WhenAny(
+                pendingRequest.Task,
+                Task.Delay(GameplayServiceTimeout, connection.Cancellation.Token)).ConfigureAwait(false);
+            if (completedTask != pendingRequest.Task)
+            {
+                throw new TimeoutException("Gameplay request timed out.");
             }
 
-            var parsed = JsonUtility.FromJson<AccountCharacterListResponse>(body);
+            var response = await pendingRequest.Task.ConfigureAwait(false);
+            if (!response.Success)
+            {
+                throw new InvalidOperationException(string.IsNullOrWhiteSpace(response.ErrorText) ? "Gameplay request failed." : response.ErrorText);
+            }
+
+            var parsed = JsonUtility.FromJson<TResponse>(response.PayloadJson);
             if (parsed == null)
             {
-                throw new InvalidOperationException("Character service returned an empty response.");
+                throw new InvalidOperationException("Gameplay service returned an empty response.");
             }
 
             return parsed;
+        }
+        finally
+        {
+            _pendingGameplayServiceRequests.TryRemove(requestId, out _);
+        }
+    }
+
+    private async Task<T[]> RequestGameplayServiceArrayAsync<TRequest, T>(GameplayServiceKind serviceKind, TRequest payload)
+    {
+        var wrapper = await RequestGameplayServiceAsync<TRequest, ArrayWrapper<T>>(serviceKind, payload).ConfigureAwait(false);
+        return wrapper != null && wrapper.items != null ? wrapper.items : Array.Empty<T>();
+    }
+
+    private async Task<TResponse> SendAccountServiceRequestAsync<TRequest, TResponse>(AccountServiceKind serviceKind, TRequest payload)
+        where TResponse : class
+    {
+        using (var gatewayClient = new TcpClient())
+        {
+            var connectTask = gatewayClient.ConnectAsync(gatewayHost, gatewayTcpPort);
+            var completedConnect = await Task.WhenAny(connectTask, Task.Delay(AccountServiceTimeout)).ConfigureAwait(false);
+            if (completedConnect != connectTask)
+            {
+                throw new TimeoutException("Gateway account request timed out.");
+            }
+
+            using (var stream = gatewayClient.GetStream())
+            {
+                using var timeout = new CancellationTokenSource(AccountServiceTimeout);
+                var request = new AccountServiceRequestMessage(
+                    ++_accountServiceRequestSequence,
+                    serviceKind,
+                    accountId.Trim(),
+                    password,
+                    payload != null ? JsonUtility.ToJson(payload) : "{}");
+                await WireProtocol.WriteTcpMessageAsync(stream, request, timeout.Token).ConfigureAwait(false);
+
+                var response = await WireProtocol.ReadTcpMessageAsync(stream, timeout.Token).ConfigureAwait(false);
+                if (response is ErrorMessage error)
+                {
+                    throw new InvalidOperationException(error.Text);
+                }
+
+                if (response is not AccountServiceResponseMessage accountServiceResponse)
+                {
+                    throw new InvalidOperationException("Unexpected gateway account response.");
+                }
+
+                if (!accountServiceResponse.Success)
+                {
+                    throw new InvalidOperationException(accountServiceResponse.ErrorText);
+                }
+
+                var parsed = JsonUtility.FromJson<TResponse>(accountServiceResponse.PayloadJson);
+                if (parsed == null)
+                {
+                    throw new InvalidOperationException("Gateway account service returned an empty response.");
+                }
+
+                return parsed;
+            }
+        }
+    }
+
+    private async Task SendAttackCommandAsync(string targetId)
+    {
+        var connection = _activeConnection;
+        if (connection == null)
+        {
+            return;
+        }
+
+        try
+        {
+            var command = new GameplayCommandMessage(SessionId, ++_gameplayCommandSequence, GameplayCommandKind.Attack, targetId);
+            await connection.SendControlMessageAsync(command).ConfigureAwait(false);
+            _mainThreadActions.Enqueue(() => StatusText = "Attacking " + targetId + "...");
+        }
+        catch (Exception ex)
+        {
+            Debug.LogException(ex);
+        }
+    }
+
+    private async Task SendCastSpellCommandAsync(string targetId)
+    {
+        var connection = _activeConnection;
+        if (connection == null)
+        {
+            return;
+        }
+
+        try
+        {
+            var command = new GameplayCommandMessage(SessionId, ++_gameplayCommandSequence, GameplayCommandKind.CastSpell, targetId);
+            await connection.SendControlMessageAsync(command).ConfigureAwait(false);
+            _mainThreadActions.Enqueue(() => StatusText = "Casting " + targetId + "...");
+        }
+        catch (Exception ex)
+        {
+            Debug.LogException(ex);
         }
     }
 
@@ -698,12 +1313,21 @@ public sealed class UnityMmoClient : MonoBehaviour
     }
 
     [Serializable]
-    private sealed class CharacterApiRequest
+    private sealed class CharacterCreateRequest
     {
-        public string accountName;
-        public string password;
         public string characterName;
+    }
+
+    [Serializable]
+    private sealed class CharacterSelectRequest
+    {
         public ulong characterId;
+    }
+
+    [Serializable]
+    private sealed class EmptyRequest
+    {
+        public static readonly EmptyRequest Instance = new EmptyRequest();
     }
 
     [Serializable]
@@ -725,9 +1349,97 @@ public sealed class UnityMmoClient : MonoBehaviour
     }
 
     [Serializable]
-    private sealed class ErrorEnvelope
+    private sealed class CraftingExecuteRequest
     {
-        public string error;
+        public ulong characterId;
+        public string recipeId;
+        public int outputMaxStack = 200;
+        public int capacity = 40;
+    }
+
+    [Serializable]
+    private sealed class ShopCatalogRequest
+    {
+        public string npcId;
+    }
+
+    [Serializable]
+    private sealed class ShopPurchaseRequest
+    {
+        public string offerId;
+        public int outputMaxStack = 200;
+        public int capacity = 40;
+    }
+
+    [Serializable]
+    private sealed class NpcContextRequest
+    {
+        public string npcId;
+    }
+
+    [Serializable]
+    private sealed class CombatEnsureRequest
+    {
+        public ulong characterId;
+    }
+
+    [Serializable]
+    private sealed class CombatAttackRequest
+    {
+        public ulong attackerCharacterId;
+        public ulong targetCharacterId;
+        public int baseDamage;
+    }
+
+    [Serializable]
+    private sealed class QuestActionRequest
+    {
+        public ulong characterId;
+        public string actionId;
+        public int amount;
+    }
+
+    [Serializable]
+    private sealed class QuestClaimRequest
+    {
+        public ulong characterId;
+        public string questId;
+    }
+
+    [Serializable]
+    private sealed class WorldEventContributionRequest
+    {
+        public string eventId;
+        public ulong characterId;
+        public int amount;
+    }
+
+    [Serializable]
+    private sealed class WorldEventClaimRequest
+    {
+        public string eventId;
+        public ulong characterId;
+    }
+
+    [Serializable]
+    private sealed class InvasionRecordKillRequest
+    {
+        public string invasionId;
+        public ulong characterId;
+        public int kills;
+    }
+
+    [Serializable]
+    private sealed class InvasionClaimRequest
+    {
+        public string invasionId;
+        public ulong characterId;
+    }
+
+    [Serializable]
+    private sealed class MessageEnvelope
+    {
+        public string message;
     }
 }
 }

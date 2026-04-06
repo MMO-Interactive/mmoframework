@@ -25,7 +25,7 @@ public sealed class CraftingStore
             using var connection = new SqliteConnection(_connectionString);
             connection.Open();
             using var command = connection.CreateCommand();
-            command.CommandText = "SELECT recipe_id, name, output_item_id, output_qty, craft_seconds, ingredients_json FROM crafting_recipes ORDER BY recipe_id;";
+            command.CommandText = "SELECT recipe_id, name, output_item_id, output_qty, craft_seconds, ingredients_json, provider_npc_id FROM crafting_recipes ORDER BY recipe_id;";
             using var reader = command.ExecuteReader();
             var recipes = new List<CraftingRecipeSnapshot>();
             while (reader.Read())
@@ -36,7 +36,8 @@ public sealed class CraftingStore
                     reader.GetString(2),
                     reader.GetInt32(3),
                     reader.GetInt32(4),
-                    JsonSerializer.Deserialize<CraftingIngredientSnapshot[]>(reader.GetString(5), JsonOptions) ?? Array.Empty<CraftingIngredientSnapshot>()));
+                    JsonSerializer.Deserialize<CraftingIngredientSnapshot[]>(reader.GetString(5), JsonOptions) ?? Array.Empty<CraftingIngredientSnapshot>(),
+                    reader.GetString(6)));
             }
 
             return recipes.ToArray();
@@ -62,14 +63,15 @@ public sealed class CraftingStore
             using var command = connection.CreateCommand();
             command.CommandText =
                 """
-                INSERT INTO crafting_recipes(recipe_id, name, output_item_id, output_qty, craft_seconds, ingredients_json, updated_at_utc)
-                VALUES ($id, $name, $outputItem, $outputQty, $seconds, $ingredients, $updated)
+                INSERT INTO crafting_recipes(recipe_id, name, output_item_id, output_qty, craft_seconds, ingredients_json, provider_npc_id, updated_at_utc)
+                VALUES ($id, $name, $outputItem, $outputQty, $seconds, $ingredients, $providerNpcId, $updated)
                 ON CONFLICT(recipe_id) DO UPDATE SET
                     name = excluded.name,
                     output_item_id = excluded.output_item_id,
                     output_qty = excluded.output_qty,
                     craft_seconds = excluded.craft_seconds,
                     ingredients_json = excluded.ingredients_json,
+                    provider_npc_id = excluded.provider_npc_id,
                     updated_at_utc = excluded.updated_at_utc;
                 """;
             command.Parameters.AddWithValue("$id", recipe.RecipeId.Trim());
@@ -78,6 +80,7 @@ public sealed class CraftingStore
             command.Parameters.AddWithValue("$outputQty", recipe.OutputQuantity);
             command.Parameters.AddWithValue("$seconds", recipe.CraftSeconds);
             command.Parameters.AddWithValue("$ingredients", JsonSerializer.Serialize(recipe.Ingredients ?? Array.Empty<CraftingIngredientSnapshot>(), JsonOptions));
+            command.Parameters.AddWithValue("$providerNpcId", recipe.ProviderNpcId ?? string.Empty);
             command.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
             command.ExecuteNonQuery();
         }
@@ -99,10 +102,21 @@ public sealed class CraftingStore
                 output_qty INTEGER NOT NULL,
                 craft_seconds INTEGER NOT NULL,
                 ingredients_json TEXT NOT NULL,
+                provider_npc_id TEXT NOT NULL DEFAULT '',
                 updated_at_utc TEXT NOT NULL
             );
             """;
         command.ExecuteNonQuery();
+
+        using var alterCommand = connection.CreateCommand();
+        alterCommand.CommandText = "ALTER TABLE crafting_recipes ADD COLUMN provider_npc_id TEXT NOT NULL DEFAULT '';";
+        try
+        {
+            alterCommand.ExecuteNonQuery();
+        }
+        catch (SqliteException)
+        {
+        }
     }
 
     private void SeedDefaultsIfEmpty()
@@ -123,7 +137,8 @@ public sealed class CraftingStore
             "plank",
             2,
             3,
-            new[] { new CraftingIngredientSnapshot("log", 1) }));
+            new[] { new CraftingIngredientSnapshot("log", 1) },
+            "merchant-1"));
 
         UpsertRecipe(new CraftingRecipeSnapshot(
             "smelt-ingot",
@@ -131,7 +146,8 @@ public sealed class CraftingStore
             "ingot",
             1,
             5,
-            new[] { new CraftingIngredientSnapshot("ore", 2) }));
+            new[] { new CraftingIngredientSnapshot("ore", 2) },
+            "merchant-1"));
     }
 
     private static readonly JsonSerializerOptions JsonOptions = new()

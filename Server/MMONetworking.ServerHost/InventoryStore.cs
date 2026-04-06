@@ -278,6 +278,86 @@ public sealed class InventoryStore
         return GetInventory(characterId, capacity);
     }
 
+    public InventorySnapshot Exchange(ulong characterId, string priceItemId, int priceQuantity, string rewardItemId, int rewardQuantity, int rewardMaxStack, int capacity = 40)
+    {
+        if (string.IsNullOrWhiteSpace(priceItemId) || priceQuantity <= 0)
+        {
+            throw new InvalidOperationException("Valid price item and quantity are required.");
+        }
+
+        if (string.IsNullOrWhiteSpace(rewardItemId) || rewardQuantity <= 0 || rewardMaxStack <= 0)
+        {
+            throw new InvalidOperationException("Valid reward item, quantity, and max stack are required.");
+        }
+
+        lock (_sync)
+        {
+            using var connection = new SqliteConnection(_connectionString);
+            connection.Open();
+            using var tx = connection.BeginTransaction();
+            var slots = ReadSlots(connection, tx, characterId);
+
+            var total = slots
+                .Where(slot => string.Equals(slot.ItemId, priceItemId, StringComparison.OrdinalIgnoreCase))
+                .Sum(slot => slot.Quantity);
+            if (total < priceQuantity)
+            {
+                throw new InvalidOperationException($"Missing payment item {priceItemId}. Need {priceQuantity}, have {total}.");
+            }
+
+            var remainingPrice = priceQuantity;
+            foreach (var slot in slots.Where(slot => string.Equals(slot.ItemId, priceItemId, StringComparison.OrdinalIgnoreCase)).OrderBy(slot => slot.SlotIndex).ToList())
+            {
+                if (remainingPrice <= 0)
+                {
+                    break;
+                }
+
+                var consume = Math.Min(remainingPrice, slot.Quantity);
+                slot.Quantity -= consume;
+                remainingPrice -= consume;
+                if (slot.Quantity <= 0)
+                {
+                    slots.Remove(slot);
+                }
+            }
+
+            var outputRemaining = rewardQuantity;
+            foreach (var slot in slots.Where(slot => string.Equals(slot.ItemId, rewardItemId, StringComparison.OrdinalIgnoreCase) && slot.Quantity < rewardMaxStack))
+            {
+                var room = rewardMaxStack - slot.Quantity;
+                var add = Math.Min(room, outputRemaining);
+                slot.Quantity += add;
+                outputRemaining -= add;
+                if (outputRemaining <= 0)
+                {
+                    break;
+                }
+            }
+
+            while (outputRemaining > 0)
+            {
+                var freeSlot = Enumerable.Range(0, capacity)
+                    .Select(index => (int?)index)
+                    .FirstOrDefault(index => slots.All(slot => slot.SlotIndex != index));
+
+                if (!freeSlot.HasValue)
+                {
+                    throw new InvalidOperationException("Inventory is full for shop purchase.");
+                }
+
+                var add = Math.Min(rewardMaxStack, outputRemaining);
+                slots.Add(new MutableSlot(freeSlot.Value, rewardItemId, add));
+                outputRemaining -= add;
+            }
+
+            PersistSlots(connection, tx, characterId, slots);
+            tx.Commit();
+        }
+
+        return GetInventory(characterId, capacity);
+    }
+
     private static List<MutableSlot> ReadSlots(SqliteConnection connection, SqliteTransaction tx, ulong characterId)
     {
         using var command = connection.CreateCommand();
@@ -325,41 +405,105 @@ public sealed class InventoryStore
     {
         using var connection = new SqliteConnection(_connectionString);
         connection.Open();
+        if (!TableExists(connection, "inventory_slots"))
+        {
+            CreateCharacterScopedInventoryTable(connection, "inventory_slots");
+            return;
+        }
+
+        if (ColumnExists(connection, "inventory_slots", "account_id"))
+        {
+            MigrateLegacyAccountScopedTable(connection);
+        }
+
+        using var index = connection.CreateCommand();
+        index.CommandText = "CREATE UNIQUE INDEX IF NOT EXISTS ix_inventory_slots_character_slot ON inventory_slots(character_id, slot_index);";
+        index.ExecuteNonQuery();
+    }
+
+    private static void MigrateLegacyAccountScopedTable(SqliteConnection connection)
+    {
+        CreateCharacterScopedInventoryTable(connection, "inventory_slots_v2");
+
+        using (var migrate = connection.CreateCommand())
+        {
+            migrate.CommandText =
+                """
+                INSERT OR REPLACE INTO inventory_slots_v2(character_id, slot_index, item_id, quantity, updated_at_utc)
+                SELECT resolved.character_id, resolved.slot_index, resolved.item_id, resolved.quantity, resolved.updated_at_utc
+                FROM (
+                    SELECT
+                        CASE
+                            WHEN inventory_slots.character_id IS NOT NULL THEN inventory_slots.character_id
+                            ELSE (
+                                SELECT primary_character_id
+                                FROM accounts
+                                WHERE accounts.account_id = inventory_slots.account_id
+                            )
+                        END AS character_id,
+                        inventory_slots.slot_index,
+                        inventory_slots.item_id,
+                        inventory_slots.quantity,
+                        inventory_slots.updated_at_utc
+                    FROM inventory_slots
+                ) AS resolved
+                WHERE resolved.character_id IS NOT NULL;
+                """;
+            migrate.ExecuteNonQuery();
+        }
+
+        using (var dropLegacy = connection.CreateCommand())
+        {
+            dropLegacy.CommandText = "DROP TABLE inventory_slots;";
+            dropLegacy.ExecuteNonQuery();
+        }
+
+        using (var rename = connection.CreateCommand())
+        {
+            rename.CommandText = "ALTER TABLE inventory_slots_v2 RENAME TO inventory_slots;";
+            rename.ExecuteNonQuery();
+        }
+    }
+
+    private static void CreateCharacterScopedInventoryTable(SqliteConnection connection, string tableName)
+    {
         using var command = connection.CreateCommand();
         command.CommandText =
-            """
-            CREATE TABLE IF NOT EXISTS inventory_slots (
-                account_id TEXT NOT NULL,
-                character_id INTEGER NULL,
+            $"""
+            CREATE TABLE IF NOT EXISTS {tableName} (
+                character_id INTEGER NOT NULL,
                 slot_index INTEGER NOT NULL,
                 item_id TEXT NOT NULL,
                 quantity INTEGER NOT NULL,
                 updated_at_utc TEXT NOT NULL,
-                PRIMARY KEY (account_id, slot_index)
+                PRIMARY KEY (character_id, slot_index)
             );
             """;
         command.ExecuteNonQuery();
+    }
 
-        using (var migrateColumn = connection.CreateCommand())
+    private static bool TableExists(SqliteConnection connection, string tableName)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = $name LIMIT 1;";
+        command.Parameters.AddWithValue("$name", tableName);
+        return command.ExecuteScalar() != null;
+    }
+
+    private static bool ColumnExists(SqliteConnection connection, string tableName, string columnName)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"PRAGMA table_info({tableName});";
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
         {
-            migrateColumn.CommandText =
-                """
-                UPDATE inventory_slots
-                SET character_id = (
-                    SELECT primary_character_id
-                    FROM accounts
-                    WHERE accounts.account_id = inventory_slots.account_id
-                )
-                WHERE character_id IS NULL;
-                """;
-            migrateColumn.ExecuteNonQuery();
+            if (string.Equals(reader.GetString(1), columnName, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
         }
 
-        using (var index = connection.CreateCommand())
-        {
-            index.CommandText = "CREATE UNIQUE INDEX IF NOT EXISTS ix_inventory_slots_character_slot ON inventory_slots(character_id, slot_index);";
-            index.ExecuteNonQuery();
-        }
+        return false;
     }
 
     private sealed class MutableSlot

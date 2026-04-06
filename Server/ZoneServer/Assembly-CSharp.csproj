@@ -63,6 +63,7 @@
   <ItemGroup>
     <Compile Include="Assets\Scripts\MMONetworking\ZoneServer\UnityZoneServerBootstrap.cs" />
     <Compile Include="Assets\Scripts\MMONetworking\ZoneServer\UnityZoneServerRuntime.cs" />
+    <Compile Include="Assets\Scripts\MMONetworking\Shared\IsExternalInit.cs" />
     <Compile Include="Assets\Scripts\MMONetworking\Shared\Primitives.cs" />
     <Compile Include="Assets\Scripts\MMONetworking\Shared\WireProtocol.cs" />
     <Compile Include="Assets\Scripts\MMONetworking\ZoneServer\UnityZoneServerStatusView.cs" />

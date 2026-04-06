@@ -68,13 +68,15 @@ public readonly struct ResourceNodeSnapshot
 
 public readonly struct MobSnapshot
 {
-    public MobSnapshot(string mobId, string mobTypeId, NetworkVector3 position, NetworkVector3 velocity, string state)
+    public MobSnapshot(string mobId, string mobTypeId, NetworkVector3 position, NetworkVector3 velocity, string state, int hitPoints, int maxHitPoints)
     {
         MobId = mobId;
         MobTypeId = mobTypeId;
         Position = position;
         Velocity = velocity;
         State = state;
+        HitPoints = hitPoints;
+        MaxHitPoints = maxHitPoints;
     }
 
     public string MobId { get; }
@@ -82,6 +84,46 @@ public readonly struct MobSnapshot
     public NetworkVector3 Position { get; }
     public NetworkVector3 Velocity { get; }
     public string State { get; }
+    public int HitPoints { get; }
+    public int MaxHitPoints { get; }
+}
+
+public readonly struct NpcServiceSnapshot
+{
+    public NpcServiceSnapshot(string actionId, string label, string uiHint)
+    {
+        ActionId = actionId;
+        Label = label;
+        UiHint = uiHint;
+    }
+
+    public string ActionId { get; }
+    public string Label { get; }
+    public string UiHint { get; }
+}
+
+public readonly struct NpcSnapshot
+{
+    public NpcSnapshot(string npcId, string npcTypeId, string displayName, NetworkVector3 position, string primaryRole, string[] services, string greetingText, NpcServiceSnapshot[] serviceOptions)
+    {
+        NpcId = npcId;
+        NpcTypeId = npcTypeId;
+        DisplayName = displayName;
+        Position = position;
+        PrimaryRole = primaryRole;
+        Services = services ?? Array.Empty<string>();
+        GreetingText = greetingText ?? string.Empty;
+        ServiceOptions = serviceOptions ?? Array.Empty<NpcServiceSnapshot>();
+    }
+
+    public string NpcId { get; }
+    public string NpcTypeId { get; }
+    public string DisplayName { get; }
+    public NetworkVector3 Position { get; }
+    public string PrimaryRole { get; }
+    public string[] Services { get; }
+    public string GreetingText { get; }
+    public NpcServiceSnapshot[] ServiceOptions { get; }
 }
 
 public readonly struct ZonePlayerStateUpdate
@@ -102,7 +144,9 @@ public readonly struct ZonePlayerStateUpdate
 
 public readonly struct ZoneDefinition
 {
-    public ZoneDefinition(int zoneId, string name, string host, int tcpPort, int udpPort, float minX, float maxX, float minZ, float maxZ)
+    public const float StandardZoneSizeMeters = 2000f;
+
+    public ZoneDefinition(int zoneId, string name, string host, int tcpPort, int udpPort, float minX, float maxX, float minZ, float maxZ, string assetBundleName = "")
     {
         ZoneId = zoneId;
         Name = name;
@@ -113,6 +157,7 @@ public readonly struct ZoneDefinition
         MaxX = maxX;
         MinZ = minZ;
         MaxZ = maxZ;
+        AssetBundleName = assetBundleName ?? string.Empty;
     }
 
     public int ZoneId { get; }
@@ -124,6 +169,9 @@ public readonly struct ZoneDefinition
     public float MaxX { get; }
     public float MinZ { get; }
     public float MaxZ { get; }
+    public string AssetBundleName { get; }
+    public int GridX => (int)Math.Round(MinX / StandardZoneSizeMeters);
+    public int GridZ => (int)Math.Round(MinZ / StandardZoneSizeMeters);
 
     public bool Contains(NetworkVector3 position)
         => position.X >= MinX && position.X < MaxX && position.Z >= MinZ && position.Z < MaxZ;

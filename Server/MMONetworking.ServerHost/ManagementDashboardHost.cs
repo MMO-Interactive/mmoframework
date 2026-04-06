@@ -66,6 +66,10 @@ public sealed class ManagementDashboardHost
         var assetApiBaseUrl = Environment.GetEnvironmentVariable("MMO_ASSET_API_BASE_URL")?.TrimEnd('/')
             ?? "http://127.0.0.1:7095";
         var assetApiKey = Environment.GetEnvironmentVariable("MMO_ASSET_API_KEY");
+        var assetChannel = Environment.GetEnvironmentVariable("MMO_ASSET_CHANNEL")?.Trim().ToLowerInvariant()
+            ?? "live";
+        var assetPlatform = Environment.GetEnvironmentVariable("MMO_ASSET_PLATFORM")?.Trim().ToLowerInvariant()
+            ?? "windows";
 
         app.MapGet("/api/dashboard", () => Results.Json(CreateSnapshot()));
         app.MapPost("/api/accounts/characters/list", async (HttpContext context) =>
@@ -725,6 +729,32 @@ public sealed class ManagementDashboardHost
             var platform = form["platform"].ToString().Trim();
             var unityVersion = form["unityVersion"].ToString().Trim();
             var notes = form["notes"].ToString().Trim();
+            if (assetType == "zone")
+            {
+                if (string.IsNullOrWhiteSpace(bundleName))
+                {
+                    var inferredName = Path.GetFileNameWithoutExtension(sourceName)?.Trim();
+                    if (!string.IsNullOrWhiteSpace(inferredName))
+                    {
+                        bundleName = inferredName;
+                    }
+                }
+
+                if (string.IsNullOrWhiteSpace(bundleVersion))
+                {
+                    bundleVersion = DateTime.UtcNow.ToString("yyyy.MM.dd.HHmmss");
+                }
+
+                if (string.IsNullOrWhiteSpace(platform))
+                {
+                    platform = assetPlatform;
+                }
+
+                if (string.IsNullOrWhiteSpace(unityVersion))
+                {
+                    unityVersion = "unknown";
+                }
+            }
             var targetUrl = $"{assetApiBaseUrl}/api/assets/artifacts?sourceName={Uri.EscapeDataString(sourceName)}";
 
             using var http = new HttpClient();
@@ -748,6 +778,7 @@ public sealed class ManagementDashboardHost
 
             var parsed = JsonSerializer.Deserialize<JsonElement>(responseText);
             object? bundleRegistration = null;
+            object? manifestRegistration = null;
             if (!string.IsNullOrWhiteSpace(bundleName)
                 && !string.IsNullOrWhiteSpace(bundleVersion)
                 && !string.IsNullOrWhiteSpace(platform)
@@ -778,15 +809,117 @@ public sealed class ManagementDashboardHost
                             error = $"Bundle registration failed with HTTP {(int)registerResponse.StatusCode}.",
                             details = registerText
                         };
+
+                    if (assetType == "zone"
+                        && registerResponse.IsSuccessStatusCode
+                        && bundleRegistration is JsonElement bundleJson
+                        && bundleJson.ValueKind == JsonValueKind.Object
+                        && bundleJson.TryGetProperty("bundleVersionId", out var bundleVersionIdElement)
+                        && bundleVersionIdElement.TryGetInt64(out var bundleVersionId))
+                    {
+                        try
+                        {
+                            var createManifestUrl = $"{assetApiBaseUrl}/api/assets/manifests";
+                            using var manifestCreateResponse = await http.PostAsJsonAsync(
+                                createManifestUrl,
+                                new
+                                {
+                                    channel = assetChannel,
+                                    createdBy = "dashboard-upload"
+                                },
+                                context.RequestAborted).ConfigureAwait(false);
+                            var manifestCreateText = await manifestCreateResponse.Content.ReadAsStringAsync(context.RequestAborted).ConfigureAwait(false);
+                            if (!manifestCreateResponse.IsSuccessStatusCode)
+                            {
+                                manifestRegistration = new
+                                {
+                                    error = $"Manifest creation failed with HTTP {(int)manifestCreateResponse.StatusCode}.",
+                                    details = manifestCreateText
+                                };
+                            }
+                            else
+                            {
+                                var manifestJson = JsonSerializer.Deserialize<JsonElement>(manifestCreateText);
+                                if (manifestJson.ValueKind == JsonValueKind.Object
+                                    && manifestJson.TryGetProperty("manifestId", out var manifestIdElement)
+                                    && manifestIdElement.TryGetInt64(out var manifestId))
+                                {
+                                    var upsertEntryUrl = $"{assetApiBaseUrl}/api/assets/manifests/{manifestId}/entries";
+                                    using var manifestEntryResponse = await http.PostAsJsonAsync(
+                                        upsertEntryUrl,
+                                        new
+                                        {
+                                            bundleName,
+                                            platform,
+                                            bundleVersionId
+                                        },
+                                        context.RequestAborted).ConfigureAwait(false);
+                                    var manifestEntryText = await manifestEntryResponse.Content.ReadAsStringAsync(context.RequestAborted).ConfigureAwait(false);
+                                    if (!manifestEntryResponse.IsSuccessStatusCode)
+                                    {
+                                        manifestRegistration = new
+                                        {
+                                            error = $"Manifest entry failed with HTTP {(int)manifestEntryResponse.StatusCode}.",
+                                            details = manifestEntryText,
+                                            manifest = manifestJson
+                                        };
+                                    }
+                                    else
+                                    {
+                                        var promoteUrl = $"{assetApiBaseUrl}/api/assets/channels/{Uri.EscapeDataString(assetChannel)}/promote";
+                                        using var promoteResponse = await http.PostAsJsonAsync(
+                                            promoteUrl,
+                                            new
+                                            {
+                                                manifestId,
+                                                actor = "dashboard-upload"
+                                            },
+                                            context.RequestAborted).ConfigureAwait(false);
+                                        var promoteText = await promoteResponse.Content.ReadAsStringAsync(context.RequestAborted).ConfigureAwait(false);
+                                        manifestRegistration = new
+                                        {
+                                            manifest = manifestJson,
+                                            entry = JsonSerializer.Deserialize<JsonElement>(manifestEntryText),
+                                            promotion = promoteResponse.IsSuccessStatusCode
+                                                ? JsonSerializer.Deserialize<JsonElement>(promoteText)
+                                                : new
+                                                {
+                                                    error = $"Promotion failed with HTTP {(int)promoteResponse.StatusCode}.",
+                                                    details = promoteText
+                                                } as object
+                                        };
+                                    }
+                                }
+                                else
+                                {
+                                    manifestRegistration = new
+                                    {
+                                        error = "Manifest creation response did not include manifestId.",
+                                        details = manifestCreateText
+                                    };
+                                }
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            manifestRegistration = new
+                            {
+                                error = "Manifest promotion pipeline threw an exception.",
+                                details = ex.Message
+                            };
+                        }
+                    }
                 }
             }
             return Results.Json(new
             {
                 assetApiBaseUrl,
+                assetChannel,
                 sourceName,
                 assetType,
                 artifact = parsed,
-                bundleRegistration
+                bundleRegistration,
+                manifestRegistration
             });
         });
         app.MapGet("/api/assets/zone-assets", async (HttpContext context) =>
@@ -879,6 +1012,11 @@ public sealed class ManagementDashboardHost
         {
             context.Response.ContentType = "text/html; charset=utf-8";
             await context.Response.WriteAsync(BuildDefinitionEditorPage("Zones", "zones"), cancellationToken);
+        });
+        app.MapGet("/tools/npcs", async context =>
+        {
+            context.Response.ContentType = "text/html; charset=utf-8";
+            await context.Response.WriteAsync(BuildDefinitionEditorPage("NPCs", "npcs"), cancellationToken);
         });
         app.MapGet("/tools/moderation", async context =>
         {
@@ -1720,6 +1858,7 @@ public sealed class ManagementDashboardHost
       <div class="badge"><a href="/tools/resources" style="color:inherit;text-decoration:none;">Resources Tool</a></div>
       <div class="badge"><a href="/tools/nodes" style="color:inherit;text-decoration:none;">Nodes Tool</a></div>
       <div class="badge"><a href="/tools/zones" style="color:inherit;text-decoration:none;">Zones Tool</a></div>
+      <div class="badge"><a href="/tools/npcs" style="color:inherit;text-decoration:none;">NPCs Tool</a></div>
       <div class="badge"><a href="/tools/moderation" style="color:inherit;text-decoration:none;">Moderation Tool</a></div>
       <div class="badge"><a href="/tools/inventory" style="color:inherit;text-decoration:none;">Inventory Tool</a></div>
       <div class="badge"><a href="/tools/crafting" style="color:inherit;text-decoration:none;">Crafting Tool</a></div>
@@ -1807,6 +1946,7 @@ public sealed class ManagementDashboardHost
           <li><a href="/tools/resources">Resources</a></li>
           <li><a href="/tools/nodes">Resource Nodes</a></li>
           <li><a href="/tools/zones">Zones</a></li>
+          <li><a href="/tools/npcs">NPCs</a></li>
           <li><a href="/tools/moderation">Moderation</a></li>
           <li><a href="/tools/inventory">Inventory</a></li>
           <li><a href="/tools/crafting">Crafting</a></li>
@@ -1961,6 +2101,7 @@ public sealed class ManagementDashboardHost
       <a class="tool" href="/tools/resources"><strong>Resources</strong><span class="muted">Map gatherable resource types to item output.</span></a>
       <a class="tool" href="/tools/nodes"><strong>Resource Nodes</strong><span class="muted">Place nodes in zones with respawn values.</span></a>
       <a class="tool" href="/tools/zones"><strong>Zones</strong><span class="muted">Edit world bounds metadata for design ops.</span></a>
+      <a class="tool" href="/tools/npcs"><strong>NPCs</strong><span class="muted">Author shopkeepers, quest givers, trainers, and service roles per zone.</span></a>
       <a class="tool" href="/tools/moderation"><strong>Moderation</strong><span class="muted">Runtime account actions: mute, ban, kick, history.</span></a>
       <a class="tool" href="/tools/inventory"><strong>Inventory</strong><span class="muted">Load accounts and perform add/move/split/remove operations.</span></a>
       <a class="tool" href="/tools/crafting"><strong>Crafting</strong><span class="muted">Manage recipes and execute crafts against account inventory.</span></a>
@@ -2029,7 +2170,7 @@ public sealed class ManagementDashboardHost
         <div class="field">
           <label for="assetType">Asset Type</label>
           <select id="assetType" name="assetType">
-            <option value="zone">Zone</option>
+            <option value="zone" selected>Zone</option>
             <option value="music">Music</option>
             <option value="sound_effect">Sound Effect</option>
             <option value="particle_effect">Particle Effect</option>
@@ -2037,7 +2178,7 @@ public sealed class ManagementDashboardHost
             <option value="ui">UI</option>
             <option value="texture">Texture</option>
             <option value="animation">Animation</option>
-            <option value="generic" selected>Generic</option>
+            <option value="generic">Generic</option>
           </select>
         </div>
         <div class="field">
@@ -2104,6 +2245,8 @@ public sealed class ManagementDashboardHost
         } catch {
           output.textContent = text;
         }
+
+        await loadAssetOverview();
       } catch (error) {
         output.textContent = 'Upload error: ' + (error && error.message ? error.message : String(error));
       }
@@ -2196,6 +2339,7 @@ public sealed class ManagementDashboardHost
         <a class="btn" href="/tools/resources">Resources</a>
         <a class="btn" href="/tools/nodes">Nodes</a>
         <a class="btn" href="/tools/zones">Zones</a>
+        <a class="btn" href="/tools/npcs">NPCs</a>
       </div>
     </section>
 
@@ -2233,6 +2377,7 @@ public sealed class ManagementDashboardHost
     const formFields = document.getElementById('formFields');
     const tableHead = document.getElementById('tableHead');
     const tableBody = document.getElementById('tableBody');
+    const zoneSizeMeters = 2000;
     let rows = [];
     let selectedIndex = -1;
     let zoneAssetOptions = [];
@@ -2269,10 +2414,21 @@ public sealed class ManagementDashboardHost
           { key: 'zoneId', label: 'Zone Id', type: 'number' },
           { key: 'name', label: 'Name', type: 'text' },
           { key: 'zoneAssetBundle', label: 'Zone Asset Bundle', type: 'select', optionsKey: 'zoneAssets' },
-          { key: 'minX', label: 'Min X', type: 'number', step: '0.1' },
-          { key: 'maxX', label: 'Max X', type: 'number', step: '0.1' },
-          { key: 'minZ', label: 'Min Z', type: 'number', step: '0.1' },
-          { key: 'maxZ', label: 'Max Z', type: 'number', step: '0.1' }
+          { key: 'gridX', label: 'Grid X', type: 'number' },
+          { key: 'gridZ', label: 'Grid Z', type: 'number' }
+        ];
+        case 'npcs': return [
+          { key: 'npcId', label: 'NPC Id', type: 'text' },
+          { key: 'zoneId', label: 'Zone Id', type: 'number' },
+          { key: 'npcTypeId', label: 'NPC Type Id', type: 'text' },
+          { key: 'displayName', label: 'Display Name', type: 'text' },
+          { key: 'primaryRole', label: 'Primary Role', type: 'text' },
+          { key: 'positionX', label: 'Position X', type: 'number', step: '0.1' },
+          { key: 'positionY', label: 'Position Y', type: 'number', step: '0.1' },
+          { key: 'positionZ', label: 'Position Z', type: 'number', step: '0.1' },
+          { key: 'services', label: 'Services', type: 'csv' },
+          { key: 'serviceOptionsText', label: 'Service Options', type: 'text' },
+          { key: 'greetingText', label: 'Greeting Text', type: 'text' }
         ];
         default: return [];
       }
@@ -2283,22 +2439,59 @@ public sealed class ManagementDashboardHost
       for (const field of fieldConfig()) {
         if (field.type === 'number') {
           row[field.key] = 0;
+        } else if (field.type === 'csv') {
+          row[field.key] = [];
         } else {
           row[field.key] = '';
         }
       }
+      if (section === 'zones') {
+        row.gridX = 0;
+        row.gridZ = 0;
+      }
       return row;
+    }
+
+    function formatNpcServiceOptions(value) {
+      const options = Array.isArray(value) ? value : [];
+      return options
+        .map(option => [option.actionId, option.label, option.uiHint].map(part => String(part || '').trim()).join('|'))
+        .join(', ');
+    }
+
+    function parseNpcServiceOptions(value) {
+      return String(value || '')
+        .split(',')
+        .map(entry => entry.trim())
+        .filter(entry => entry.length > 0)
+        .map(entry => {
+          const parts = entry.split('|').map(part => part.trim());
+          return {
+            actionId: parts[0] || '',
+            label: parts[1] || parts[0] || '',
+            uiHint: parts.slice(2).join(' | ')
+          };
+        })
+        .filter(option => option.actionId.length > 0);
     }
 
     function renderForm(row) {
       formFields.innerHTML = fieldConfig().map(field => `
-        <div class="field ${field.type === 'text' && field.key === 'name' ? 'full' : ''}">
+        <div class="field ${(field.type === 'text' && (field.key === 'name' || field.key === 'displayName' || field.key === 'greetingText' || field.key === 'serviceOptionsText')) || field.type === 'csv' ? 'full' : ''}">
           <label for="field_${field.key}">${field.label}</label>
           ${field.type === 'select'
             ? `<select id="field_${field.key}">${renderSelectOptions(field, row[field.key])}</select>`
-            : `<input id="field_${field.key}" type="${field.type}" ${field.step ? `step="${field.step}"` : ''} value="${row[field.key] ?? ''}" />`}
+            : `<input id="field_${field.key}" type="${field.type === 'csv' ? 'text' : field.type}" ${field.step ? `step="${field.step}"` : ''} value="${field.key === 'serviceOptionsText' ? escapeAttr(formatNpcServiceOptions(row.serviceOptions)) : field.type === 'csv' ? escapeAttr(Array.isArray(row[field.key]) ? row[field.key].join(', ') : '') : escapeAttr(row[field.key] ?? '')}" />`}
         </div>
       `).join('');
+    }
+
+    function escapeAttr(value) {
+      return String(value ?? '')
+        .replaceAll('&', '&amp;')
+        .replaceAll('"', '&quot;')
+        .replaceAll('<', '&lt;')
+        .replaceAll('>', '&gt;');
     }
 
     function renderSelectOptions(field, selectedValue) {
@@ -2318,17 +2511,68 @@ public sealed class ManagementDashboardHost
       const row = {};
       for (const field of fieldConfig()) {
         const raw = document.getElementById(`field_${field.key}`).value;
-        row[field.key] = field.type === 'number' ? Number(raw || 0) : raw.trim();
+        if (field.type === 'number') {
+          row[field.key] = Number(raw || 0);
+        } else if (field.type === 'csv') {
+          row[field.key] = raw
+            .split(',')
+            .map(value => value.trim())
+            .filter(value => value.length > 0);
+        } else if (field.key === 'serviceOptionsText') {
+          row.serviceOptions = parseNpcServiceOptions(raw);
+        } else {
+          row[field.key] = raw.trim();
+        }
       }
       return row;
     }
 
+    function formatCellValue(row, field) {
+      if (section === 'zones' && (field.key === 'gridX' || field.key === 'gridZ')) {
+        return row[field.key] ?? 0;
+      }
+
+      return row[field.key] ?? '';
+    }
+
+    function hydrateRowForEditor(row) {
+      if (section !== 'zones') {
+        return { ...(row || {}) };
+      }
+
+      const next = { ...(row || {}) };
+      const minX = Number(next.minX || 0);
+      const minZ = Number(next.minZ || 0);
+      next.gridX = Math.round(minX / zoneSizeMeters);
+      next.gridZ = Math.round(minZ / zoneSizeMeters);
+      return next;
+    }
+
+    function dehydrateRowForSave(row) {
+      if (section !== 'zones') {
+        return row;
+      }
+
+      const gridX = Number(row.gridX || 0);
+      const gridZ = Number(row.gridZ || 0);
+      return {
+        zoneId: Number(row.zoneId || 0),
+        name: String(row.name || '').trim(),
+        zoneAssetBundle: String(row.zoneAssetBundle || '').trim(),
+        minX: gridX * zoneSizeMeters,
+        maxX: (gridX + 1) * zoneSizeMeters,
+        minZ: gridZ * zoneSizeMeters,
+        maxZ: (gridZ + 1) * zoneSizeMeters
+      };
+    }
+
     function renderTable() {
       const fields = fieldConfig();
-      tableHead.innerHTML = fields.slice(0, 4).map(field => `<th>${field.label}</th>`).join('');
+      const visibleFields = section === 'zones' ? fields.slice(0, 5) : fields.slice(0, 4);
+      tableHead.innerHTML = visibleFields.map(field => `<th>${field.label}</th>`).join('');
       tableBody.innerHTML = rows.map((row, index) => `
         <tr data-index="${index}" class="${index === selectedIndex ? 'is-selected' : ''}">
-          ${fields.slice(0, 4).map(field => `<td>${row[field.key] ?? ''}</td>`).join('')}
+          ${visibleFields.map(field => `<td>${formatCellValue(row, field)}</td>`).join('')}
         </tr>
       `).join('');
 
@@ -2367,11 +2611,13 @@ public sealed class ManagementDashboardHost
       await loadZoneAssetOptions();
       const response = await fetch('/api/gameplay-definitions', { cache: 'no-store' });
       const snapshot = await response.json();
-      rows = [...(snapshot[section] || [])];
+      rows = [...(snapshot[section] || [])].map(hydrateRowForEditor);
       selectedIndex = rows.length > 0 ? 0 : -1;
       renderForm(selectedIndex >= 0 ? rows[selectedIndex] : createEmptyRow());
       renderTable();
-      status.textContent = `Loaded ${section} at ${new Date().toLocaleTimeString()}`;
+      status.textContent = section === 'zones'
+        ? `Loaded ${section} at ${new Date().toLocaleTimeString()} | grid size ${zoneSizeMeters}m`
+        : `Loaded ${section} at ${new Date().toLocaleTimeString()}`;
     }
 
     async function saveRows() {
@@ -2386,7 +2632,7 @@ public sealed class ManagementDashboardHost
 
         const currentResponse = await fetch('/api/gameplay-definitions', { cache: 'no-store' });
         const current = await currentResponse.json();
-        current[section] = rows;
+        current[section] = rows.map(dehydrateRowForSave);
 
         const saveResponse = await fetch('/api/gameplay-definitions', {
           method: 'PUT',
@@ -2398,7 +2644,7 @@ public sealed class ManagementDashboardHost
           throw new Error(result.error || 'Save failed');
         }
 
-        rows = [...(result[section] || [])];
+        rows = [...(result[section] || [])].map(hydrateRowForEditor);
         selectedIndex = rows.length === 0 ? -1 : Math.min(selectedIndex, rows.length - 1);
         renderForm(selectedIndex >= 0 ? rows[selectedIndex] : createEmptyRow());
         renderTable();
@@ -2451,6 +2697,7 @@ public sealed class ManagementDashboardHost
             "resources" => """{"id":"hemp","name":"Hemp Plant","itemId":"fiber","baseYield":1}""",
             "nodes" => """{"id":"hemp-1","zoneId":1,"resourceId":"hemp","positionX":18,"positionY":0,"positionZ":63,"respawnSeconds":12}""",
             "zones" => """{"zoneId":3,"name":"EastField","zoneAssetBundle":"zone-eastfield","minX":200,"maxX":300,"minZ":0,"maxZ":100}""",
+            "npcs" => """{"npcId":"merchant-3","zoneId":3,"npcTypeId":"merchant","displayName":"Quartermaster Iven","positionX":222,"positionY":0,"positionZ":44,"primaryRole":"shop","services":["shop","crafting"],"greetingText":"If you've brought good stock, I've got better gear.","serviceOptions":[{"actionId":"shop","label":"Shop","uiHint":"Browse merchant stock"}]}""",
             _ => "{}"
         };
 
@@ -2485,6 +2732,7 @@ public sealed class ManagementDashboardHost
         <a class="btn" href="/tools/resources">Resources</a>
         <a class="btn" href="/tools/nodes">Nodes</a>
         <a class="btn" href="/tools/zones">Zones</a>
+        <a class="btn" href="/tools/npcs">NPCs</a>
         <a class="btn" href="/tools/moderation">Moderation</a>
         <a class="btn" href="/tools/inventory">Inventory</a>
         <a class="btn" href="/tools/crafting">Crafting</a>
@@ -4265,7 +4513,7 @@ public sealed class ManagementDashboardHost
         var dashboard = CreateSnapshot();
         var accounts = _accountStore.GetAccounts();
         var definitions = _gameplayDefinitions.GetSnapshot();
-        var moderation = _moderationStore.GetSnapshot(500);
+        var moderation = _moderationStore.CreateSnapshot(500);
         var combat = _combatStore.GetSnapshot(1000);
         var recipes = _craftingStore.GetRecipes();
 
@@ -4781,6 +5029,7 @@ public sealed class ManagementDashboardHost
           <div class="legend-item"><span><span class="swatch" style="background: var(--player-transfer);"></span>Transferring</span><span id="transferCount">0</span></div>
           <div class="legend-item"><span><span class="swatch" style="background: var(--player-ghost);"></span>Ghost / overlap</span><span id="ghostCount">0</span></div>
           <div class="legend-item"><span><span class="swatch" style="background: #ff7d7d;"></span>Mobs</span><span id="mobCount">0</span></div>
+          <div class="legend-item"><span><span class="swatch" style="background: #ffd166;"></span>NPCs</span><span id="npcCount">0</span></div>
           <div class="legend-item"><span><span class="swatch" style="background: #6ed6ff;"></span>Resource nodes</span><span id="nodeCount">0</span></div>
           <div class="legend-item"><span>Zones</span><span id="zoneCount">0</span></div>
           <div class="legend-item"><span>Updated</span><span id="updatedAt">-</span></div>
@@ -4797,6 +5046,8 @@ public sealed class ManagementDashboardHost
         <div class="zone-list" id="zoneList"></div>
         <div class="section-title">Resource Nodes</div>
         <div class="zone-list" id="nodeList"></div>
+        <div class="section-title">NPCs</div>
+        <div class="zone-list" id="npcList"></div>
       </aside>
     </section>
   </div>
@@ -4814,6 +5065,7 @@ public sealed class ManagementDashboardHost
     let latestPlayers = [];
     let latestNodes = [];
     let latestMobs = [];
+    let latestNpcs = [];
 
     function escapeHtml(value) {
       return String(value)
@@ -4996,6 +5248,9 @@ public sealed class ManagementDashboardHost
       latestNodes = (definitions && definitions.nodes ? definitions.nodes : []).filter(node =>
         typeof node.positionX === 'number' &&
         typeof node.positionZ === 'number');
+      latestNpcs = (definitions && definitions.npcs ? definitions.npcs : []).filter(npc =>
+        typeof npc.positionX === 'number' &&
+        typeof npc.positionZ === 'number');
       latestMobs = runtimeZones.flatMap(zone => (zone.mobs || []).map(mob => ({
         ...mob,
         zoneId: zone.zoneId,
@@ -5069,6 +5324,22 @@ public sealed class ManagementDashboardHost
           </g>`;
       }).join('');
 
+      const npcMarkers = latestNpcs.map(npc => {
+        const x = projectX(npc.positionX);
+        const y = projectY(npc.positionZ);
+        const role = String(npc.primaryRole || '').toLowerCase();
+        const color = role.includes('quest')
+          ? '#7cf2b4'
+          : role.includes('shop') || role.includes('craft')
+            ? '#ffd166'
+            : '#ffe7a0';
+        return `
+          <g>
+            <polygon points="${x},${y - 9} ${x + 8},${y} ${x},${y + 9} ${x - 8},${y}" fill="${color}" stroke="#2b1f09" stroke-width="2"></polygon>
+            <text x="${x + 12}" y="${y + 4}" font-size="12" fill="#fdf0c3">${escapeHtml(npc.displayName)} (${escapeHtml(npc.primaryRole || npc.npcTypeId || 'npc')})</text>
+          </g>`;
+      }).join('');
+
       const playerDots = flattenedPlayers.map(player => {
         const state = classifyPlayer(player);
         if (state.kind === 'moving') movingCount++;
@@ -5096,20 +5367,21 @@ public sealed class ManagementDashboardHost
           <text x="${width - 180}" y="${height - 10}" font-size="14" fill="#8aa3b8">Z: ${world.minZ.toFixed(0)} - ${world.maxZ.toFixed(0)}</text>
         </g>`;
 
-      svg.innerHTML = `${zoneRects}${trails}${eventMarkers}${nodeMarkers}${mobMarkers}${playerDots}${axes}`;
+      svg.innerHTML = `${zoneRects}${trails}${eventMarkers}${nodeMarkers}${mobMarkers}${npcMarkers}${playerDots}${axes}`;
 
       document.getElementById('movingCount').textContent = movingCount;
       document.getElementById('idleCount').textContent = idleCount;
       document.getElementById('transferCount').textContent = transferCount;
       document.getElementById('ghostCount').textContent = ghostCount;
       document.getElementById('mobCount').textContent = latestMobs.length;
+      document.getElementById('npcCount').textContent = latestNpcs.length;
       document.getElementById('nodeCount').textContent = latestNodes.length;
       document.getElementById('zoneCount').textContent = zones.length;
       document.getElementById('updatedAt').textContent = new Date(snapshot.generatedAtUtc).toLocaleTimeString();
       document.getElementById('zoneList').innerHTML = zones.map(zone => `
         <div class="zone-item">
           <span>Zone ${zone.zoneId} ${escapeHtml(zone.name)}</span>
-          <span class="meta">${(zone.players || []).length} players / ${zone.activeGhosts || 0} ghosts / ${(zone.mobs || []).length} mobs</span>
+          <span class="meta">${(zone.players || []).length} players / ${zone.activeGhosts || 0} ghosts / ${(zone.mobs || []).length} mobs / ${latestNpcs.filter(npc => npc.zoneId === zone.zoneId).length} npcs</span>
         </div>
         <div class="meta">Bounds X ${zone.minX.toFixed(0)}-${zone.maxX.toFixed(0)} / Z ${zone.minZ.toFixed(0)}-${zone.maxZ.toFixed(0)}</div>
         <div class="meta">${escapeHtml(zone.lifecycleState || 'Unknown')} · ${escapeHtml(zone.runtimeMode || 'Unmanaged')}</div>
@@ -5124,12 +5396,21 @@ public sealed class ManagementDashboardHost
             </div>
             <div class="meta">Position ${fmt(node.positionX)}, ${fmt(node.positionZ)} · respawn ${node.respawnSeconds}s</div>`).join('');
 
+      document.getElementById('npcList').innerHTML = latestNpcs.length === 0
+        ? '<div class="empty">No NPC definitions found.</div>'
+        : latestNpcs.map(npc => `
+            <div class="zone-item">
+              <span>${escapeHtml(npc.displayName)}</span>
+              <span class="meta">${escapeHtml(npc.primaryRole || npc.npcTypeId)} Â· zone ${npc.zoneId}</span>
+            </div>
+            <div class="meta">${escapeHtml(npc.npcId)} Â· ${fmt(npc.positionX)}, ${fmt(npc.positionZ)}</div>`).join('');
+
       svg.querySelectorAll('[data-session-id]').forEach(node => {
         node.addEventListener('click', event => {
           event.stopPropagation();
           selectedSessionId = node.getAttribute('data-session-id');
           renderPlayerDetail();
-          render(snapshot);
+          render(snapshot, definitions);
         }, { once: true });
       });
 

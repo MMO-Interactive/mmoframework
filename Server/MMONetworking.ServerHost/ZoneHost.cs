@@ -24,7 +24,9 @@ public sealed class ZoneHost : IDisposable
     private readonly GhostRegistry _ghostRegistry;
     private readonly ZoneRuntimeSettings _settings;
     private readonly Func<int, CancellationToken, Task> _ensureZoneRunningAsync;
+    private readonly GameplayNetworkService _gameplayNetworkService;
     private readonly ConcurrentDictionary<string, ZoneMob> _mobs;
+    private readonly ZoneNpc[] _npcs;
     private readonly ZoneResourceNode[] _resourceNodes;
     private readonly TcpListener _tcpListener;
     private readonly UdpClient _udpClient;
@@ -43,7 +45,10 @@ public sealed class ZoneHost : IDisposable
         SessionRegistry sessionRegistry,
         GhostRegistry ghostRegistry,
         ZoneRuntimeSettings settings,
-        Func<int, CancellationToken, Task> ensureZoneRunningAsync)
+        Func<int, CancellationToken, Task> ensureZoneRunningAsync,
+        GameplayNetworkService gameplayNetworkService,
+        NpcDefinitionSnapshot[] npcDefinitions,
+        MobSpawnDefinitionSnapshot[] mobSpawnDefinitions)
     {
         _definition = definition;
         _zoneDirectory = zoneDirectory;
@@ -51,7 +56,9 @@ public sealed class ZoneHost : IDisposable
         _ghostRegistry = ghostRegistry;
         _settings = settings;
         _ensureZoneRunningAsync = ensureZoneRunningAsync;
-        _mobs = CreateDefaultMobs(definition, settings.GetMobCountForZone(definition.ZoneId));
+        _gameplayNetworkService = gameplayNetworkService;
+        _mobs = CreateMobs(definition, settings.GetMobCountForZone(definition.ZoneId), mobSpawnDefinitions);
+        _npcs = CreateNpcs(definition, npcDefinitions);
         _resourceNodes = CreateDefaultResourceNodes(definition);
         _aoiRadiusSquared = settings.AoiRadius * settings.AoiRadius;
         _spatialCellSize = MathF.Max(settings.AoiRadius, 1f);
@@ -205,6 +212,18 @@ public sealed class ZoneHost : IDisposable
                     {
                         _sessionRegistry.TouchTcp(attach.SessionId);
                         await player.ControlConnection.SendAsync(new HeartbeatMessage(heartbeat.ServerTicks), cancellationToken).ConfigureAwait(false);
+                        continue;
+                    }
+
+                    if (message is GameplayServiceRequestMessage gameplayServiceRequest)
+                    {
+                        var response = _gameplayNetworkService.Handle(
+                            gameplayServiceRequest.SessionId,
+                            player.PlayerId,
+                            gameplayServiceRequest.RequestId,
+                            gameplayServiceRequest.ServiceKind,
+                            gameplayServiceRequest.PayloadJson);
+                        await player.ControlConnection.SendAsync(response, cancellationToken).ConfigureAwait(false);
                         continue;
                     }
                 }
@@ -465,6 +484,7 @@ public sealed class ZoneHost : IDisposable
             destination.TcpPort,
             destination.UdpPort,
             token,
+            destination.AssetBundleName,
             spawn);
 
         await player.ControlConnection.SendAsync(message, cancellationToken).ConfigureAwait(false);
@@ -582,17 +602,42 @@ public sealed class ZoneHost : IDisposable
                 mob.MobTypeId,
                 mob.Position,
                 mob.Velocity,
-                mob.State));
+                mob.State,
+                mob.HitPoints,
+                mob.MaxHitPoints));
         }
 
         visibleMobs.Sort(static (left, right) => string.CompareOrdinal(left.MobId, right.MobId));
+
+        var visibleNpcs = new List<NpcSnapshot>(4);
+        for (var i = 0; i < _npcs.Length; i++)
+        {
+            var npc = _npcs[i];
+            if (!IsWithinAoi(recipient.Position, npc.Position))
+            {
+                continue;
+            }
+
+            visibleNpcs.Add(new NpcSnapshot(
+                npc.NpcId,
+                npc.NpcTypeId,
+                npc.DisplayName,
+                npc.Position,
+                npc.PrimaryRole,
+                npc.Services,
+                npc.GreetingText,
+                npc.ServiceOptions));
+        }
+
+        visibleNpcs.Sort(static (left, right) => string.CompareOrdinal(left.NpcId, right.NpcId));
 
         return new WorldSnapshotMessage(
             _definition.ZoneId,
             _tick,
             playerSnapshots.ToArray(),
             visibleNodes.ToArray(),
-            visibleMobs.ToArray());
+            visibleMobs.ToArray(),
+            visibleNpcs.ToArray());
     }
 
     private bool IsWithinAoi(NetworkVector3 origin, NetworkVector3 target)
@@ -680,6 +725,16 @@ public sealed class ZoneHost : IDisposable
         return _definition.Clamp(new NetworkVector3(x, 0f, z));
     }
 
+    private static ConcurrentDictionary<string, ZoneMob> CreateMobs(ZoneDefinition definition, int mobCount, MobSpawnDefinitionSnapshot[] mobSpawnDefinitions)
+    {
+        if (mobSpawnDefinitions is { Length: > 0 })
+        {
+            return CreateAuthoredMobs(definition, mobSpawnDefinitions);
+        }
+
+        return CreateDefaultMobs(definition, mobCount);
+    }
+
     private static ConcurrentDictionary<string, ZoneMob> CreateDefaultMobs(ZoneDefinition definition, int mobCount)
     {
         var mobs = new ConcurrentDictionary<string, ZoneMob>();
@@ -702,12 +757,40 @@ public sealed class ZoneHost : IDisposable
             var mobTypeId = index % 2 == 0 ? "wolf" : "boar";
             var speed = mobTypeId == "wolf" ? 1.6f : 1.25f;
             var wanderRadius = mobTypeId == "wolf" ? 10f : 8f;
+            var maxHitPoints = mobTypeId == "wolf" ? 40 : 55;
             var spawn = new NetworkVector3(
                 definition.MinX + 6f + (column * spacingX) + (spacingX * 0.5f),
                 0f,
                 definition.MinZ + 6f + (row * spacingZ) + (spacingZ * 0.5f));
             var mobId = mobTypeId + "-" + definition.ZoneId + "-" + (index + 1);
-            mobs[mobId] = new ZoneMob(mobId, mobTypeId, definition.Clamp(spawn), speed, wanderRadius);
+            mobs[mobId] = new ZoneMob(mobId, mobTypeId, definition.Clamp(spawn), speed, wanderRadius, maxHitPoints);
+        }
+
+        return mobs;
+    }
+
+    private static ConcurrentDictionary<string, ZoneMob> CreateAuthoredMobs(ZoneDefinition definition, MobSpawnDefinitionSnapshot[] mobSpawnDefinitions)
+    {
+        var mobs = new ConcurrentDictionary<string, ZoneMob>();
+        foreach (var spawn in mobSpawnDefinitions.Where(entry => entry.ZoneId == definition.ZoneId))
+        {
+            var mobTypeId = string.IsNullOrWhiteSpace(spawn.MobTypeId) ? "wolf" : spawn.MobTypeId.Trim().ToLowerInvariant();
+            var speed = mobTypeId == "wolf" ? 1.6f : 1.25f;
+            var wanderRadius = MathF.Max(0.5f, spawn.RoamRadius <= 0f ? spawn.Radius : spawn.RoamRadius);
+            var maxHitPoints = mobTypeId == "wolf" ? 40 : 55;
+            var count = Math.Max(1, spawn.Count);
+            var clusterRadius = MathF.Max(0.5f, spawn.Radius);
+            for (var index = 0; index < count; index++)
+            {
+                var angle = (float)(index * (Math.PI * 2.0 / Math.Max(count, 1)));
+                var distance = count == 1 ? 0f : MathF.Min(clusterRadius, 1.5f + (index % 3));
+                var spawnPosition = new NetworkVector3(
+                    spawn.PositionX + MathF.Cos(angle) * distance,
+                    spawn.PositionY,
+                    spawn.PositionZ + MathF.Sin(angle) * distance);
+                var mobId = $"{mobTypeId}-{definition.ZoneId}-{spawn.SpawnId}-{index + 1}";
+                mobs[mobId] = new ZoneMob(mobId, mobTypeId, definition.Clamp(spawnPosition), speed, wanderRadius, maxHitPoints);
+            }
         }
 
         return mobs;
@@ -732,6 +815,99 @@ public sealed class ZoneHost : IDisposable
                 maxAmount: 5)
         };
     }
+
+    private static ZoneNpc[] CreateNpcs(ZoneDefinition definition, NpcDefinitionSnapshot[] npcDefinitions)
+    {
+        if (npcDefinitions is { Length: > 0 })
+        {
+            return npcDefinitions
+                .Where(npc => npc.ZoneId == definition.ZoneId)
+                .OrderBy(npc => npc.DisplayName, StringComparer.OrdinalIgnoreCase)
+                .Select(npc => new ZoneNpc(
+                    npc.NpcId,
+                    npc.NpcTypeId,
+                    npc.DisplayName,
+                    new NetworkVector3(npc.PositionX, npc.PositionY, npc.PositionZ),
+                    npc.PrimaryRole,
+                    npc.Services ?? Array.Empty<string>(),
+                    npc.GreetingText ?? string.Empty,
+                    ToServiceSnapshots(npc.ServiceOptions, npc.Services, npc.PrimaryRole)))
+                .ToArray();
+        }
+
+        var midZ = (definition.MinZ + definition.MaxZ) * 0.5f;
+        return new[]
+        {
+            new ZoneNpc(
+                "merchant-" + definition.ZoneId,
+                "merchant",
+                "Quartermaster Rowan",
+                new NetworkVector3(definition.MinX + 22f, 0f, midZ - 3f),
+                "shop",
+                new[] { "shop", "crafting" },
+                "Supplies for the road, tools for the trade, and a fair barter if your pack is worth opening.",
+                BuildDefaultServiceOptions("shop", "crafting")),
+            new ZoneNpc(
+                "questgiver-" + definition.ZoneId,
+                "quest_giver",
+                "Warden Elira",
+                new NetworkVector3(definition.MinX + 28f, 0f, midZ + 3f),
+                "quest",
+                new[] { "quests" },
+                "Every frontier needs hands willing to work. If you want purpose, I have tasks that matter.",
+                BuildDefaultServiceOptions("quests")),
+            new ZoneNpc(
+                "trainer-" + definition.ZoneId,
+                "trainer",
+                "Master Toren",
+                new NetworkVector3(definition.MinX + 34f, 0f, midZ),
+                "trainer",
+                new[] { "training", "progression" },
+                "Skill is earned, not granted. Show me what you've practiced, and I'll show you where to sharpen it next.",
+                BuildDefaultServiceOptions("training"))
+        };
+    }
+
+    private static NpcServiceSnapshot[] ToServiceSnapshots(NpcServiceDefinitionSnapshot[]? serviceOptions, string[]? services, string primaryRole)
+    {
+        if (serviceOptions is { Length: > 0 })
+        {
+            return serviceOptions
+                .Where(option => option is not null)
+                .Select(option => new NpcServiceSnapshot(option.ActionId, option.Label, option.UiHint))
+                .ToArray();
+        }
+
+        return BuildDefaultServiceOptions(services ?? Array.Empty<string>(), primaryRole);
+    }
+
+    private static NpcServiceSnapshot[] BuildDefaultServiceOptions(string[] services, string primaryRole)
+    {
+        var actions = new List<string>(services ?? Array.Empty<string>());
+        if (!string.IsNullOrWhiteSpace(primaryRole))
+        {
+            actions.Add(primaryRole);
+        }
+
+        return BuildDefaultServiceOptions(actions.ToArray());
+    }
+
+    private static NpcServiceSnapshot[] BuildDefaultServiceOptions(params string[] actions)
+        => actions
+            .SelectMany(action =>
+            {
+                var value = (action ?? string.Empty).Trim().ToLowerInvariant();
+                return value switch
+                {
+                    "shop" or "crafting" => new[] { new NpcServiceSnapshot("shop", "Shop", "Browse merchant stock") },
+                    "quest" or "quests" => new[] { new NpcServiceSnapshot("quests", "Quests", "Review available work") },
+                    "trainer" or "training" or "progression" => new[] { new NpcServiceSnapshot("training", "Training", "Review skill progression") },
+                    _ => Array.Empty<NpcServiceSnapshot>()
+                };
+            })
+            .GroupBy(option => option.ActionId, StringComparer.OrdinalIgnoreCase)
+            .Select(group => group.First())
+            .ToArray();
 
     private sealed class ZonePlayer
     {
@@ -780,7 +956,7 @@ public sealed class ZoneHost : IDisposable
 
     private sealed class ZoneMob
     {
-        public ZoneMob(string mobId, string mobTypeId, NetworkVector3 spawnPosition, float speed, float wanderRadius)
+        public ZoneMob(string mobId, string mobTypeId, NetworkVector3 spawnPosition, float speed, float wanderRadius, int maxHitPoints)
         {
             MobId = mobId;
             MobTypeId = mobTypeId;
@@ -789,6 +965,8 @@ public sealed class ZoneHost : IDisposable
             TargetPosition = spawnPosition;
             Speed = speed;
             WanderRadius = wanderRadius;
+            MaxHitPoints = maxHitPoints;
+            HitPoints = maxHitPoints;
             State = "Idle";
             NextDecisionUtc = DateTimeOffset.UtcNow.AddSeconds(Random.Shared.NextDouble() * 2.0 + 1.0);
         }
@@ -802,6 +980,8 @@ public sealed class ZoneHost : IDisposable
         public DateTimeOffset NextDecisionUtc { get; set; }
         public float Speed { get; }
         public float WanderRadius { get; }
+        public int HitPoints { get; set; }
+        public int MaxHitPoints { get; }
         public string State { get; set; }
     }
 
@@ -821,6 +1001,30 @@ public sealed class ZoneHost : IDisposable
         public NetworkVector3 Position { get; }
         public int Remaining { get; }
         public int MaxAmount { get; }
+    }
+
+    private sealed class ZoneNpc
+    {
+        public ZoneNpc(string npcId, string npcTypeId, string displayName, NetworkVector3 position, string primaryRole, string[] services, string greetingText, NpcServiceSnapshot[] serviceOptions)
+        {
+            NpcId = npcId;
+            NpcTypeId = npcTypeId;
+            DisplayName = displayName;
+            Position = position;
+            PrimaryRole = primaryRole;
+            Services = services ?? Array.Empty<string>();
+            GreetingText = greetingText ?? string.Empty;
+            ServiceOptions = serviceOptions ?? Array.Empty<NpcServiceSnapshot>();
+        }
+
+        public string NpcId { get; }
+        public string NpcTypeId { get; }
+        public string DisplayName { get; }
+        public NetworkVector3 Position { get; }
+        public string PrimaryRole { get; }
+        public string[] Services { get; }
+        public string GreetingText { get; }
+        public NpcServiceSnapshot[] ServiceOptions { get; }
     }
 
     private readonly record struct CellKey(int X, int Z);

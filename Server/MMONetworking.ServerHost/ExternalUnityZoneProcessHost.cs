@@ -5,6 +5,7 @@ using System.IO;
 using System.Linq;
 using System.Net.NetworkInformation;
 using System.Net.Sockets;
+using System.Text.Json;
 using System.Threading;
 using System.Threading.Tasks;
 using MMONetworking;
@@ -15,15 +16,19 @@ public sealed class ExternalUnityZoneProcessHost : IZoneRuntimeHost
 {
     private readonly ZoneDefinition _definition;
     private readonly ZoneRuntimeSettings _settings;
+    private readonly NpcDefinitionSnapshot[] _npcDefinitions;
+    private readonly MobSpawnDefinitionSnapshot[] _mobSpawnDefinitions;
     private readonly TaskCompletionSource<bool> _ready = new(TaskCreationOptions.RunContinuationsAsynchronously);
     private readonly ConcurrentDictionary<Guid, ExternalPlayerState> _players = new();
     private volatile MobSnapshot[] _mobs = Array.Empty<MobSnapshot>();
     private Process? _process;
 
-    public ExternalUnityZoneProcessHost(ZoneDefinition definition, ZoneRuntimeSettings settings)
+    public ExternalUnityZoneProcessHost(ZoneDefinition definition, ZoneRuntimeSettings settings, NpcDefinitionSnapshot[] npcDefinitions, MobSpawnDefinitionSnapshot[] mobSpawnDefinitions)
     {
         _definition = definition;
         _settings = settings;
+        _npcDefinitions = npcDefinitions ?? Array.Empty<NpcDefinitionSnapshot>();
+        _mobSpawnDefinitions = mobSpawnDefinitions ?? Array.Empty<MobSpawnDefinitionSnapshot>();
     }
 
     public int ActivePlayerCount => _players.Count;
@@ -39,6 +44,8 @@ public sealed class ExternalUnityZoneProcessHost : IZoneRuntimeHost
         }
 
         EnsurePortsAvailable();
+        var npcFilePath = WriteNpcDefinitionsFile();
+        var mobSpawnFilePath = WriteMobSpawnDefinitionsFile();
 
         var startInfo = new ProcessStartInfo
         {
@@ -64,7 +71,13 @@ public sealed class ExternalUnityZoneProcessHost : IZoneRuntimeHost
                 $"-mmo-min-z {_definition.MinZ}",
                 $"-mmo-max-z {_definition.MaxZ}",
                 $"-mmo-prewarm-margin {_settings.PrewarmMargin}",
-                $"-mmo-mob-count {_settings.GetMobCountForZone(_definition.ZoneId)}"
+                $"-mmo-mob-count {_settings.GetMobCountForZone(_definition.ZoneId)}",
+                $"-mmo-npcs-file \"{npcFilePath}\"",
+                $"-mmo-mob-spawns-file \"{mobSpawnFilePath}\"",
+                $"-mmo-asset-api-base-url \"{_settings.AssetApiBaseUrl}\"",
+                $"-mmo-asset-channel \"{_settings.AssetChannel}\"",
+                $"-mmo-asset-platform \"{_settings.AssetPlatform}\"",
+                $"-mmo-zone-bundle-name \"{ResolveZoneBundleName()}\""
             })
         };
 
@@ -256,4 +269,91 @@ public sealed class ExternalUnityZoneProcessHost : IZoneRuntimeHost
     }
 
     private sealed record ExternalPlayerState(Guid SessionId, ulong PlayerId, NetworkVector3 Position, NetworkVector3 Velocity);
+
+    private string WriteNpcDefinitionsFile()
+    {
+        var tempDirectory = Path.Combine(Path.GetTempPath(), "MMONetworking", "zone-bootstrap");
+        Directory.CreateDirectory(tempDirectory);
+        var path = Path.Combine(tempDirectory, $"zone-{_definition.ZoneId}-npcs.json");
+        var payload = JsonSerializer.Serialize(
+            new ExternalNpcDefinitionFile(
+                _npcDefinitions
+                    .Select(npc => new ExternalNpcDefinition(
+                        npc.NpcId,
+                        npc.ZoneId,
+                        npc.NpcTypeId,
+                        npc.DisplayName,
+                        npc.PositionX,
+                        npc.PositionY,
+                        npc.PositionZ,
+                        npc.PrimaryRole,
+                        npc.Services ?? Array.Empty<string>(),
+                        npc.GreetingText ?? string.Empty))
+                    .ToArray()),
+            JsonOptions);
+        File.WriteAllText(path, payload);
+        return path;
+    }
+
+    private string WriteMobSpawnDefinitionsFile()
+    {
+        var tempDirectory = Path.Combine(Path.GetTempPath(), "MMONetworking", "zone-bootstrap");
+        Directory.CreateDirectory(tempDirectory);
+        var path = Path.Combine(tempDirectory, $"zone-{_definition.ZoneId}-mob-spawns.json");
+        var payload = JsonSerializer.Serialize(
+            new ExternalMobSpawnDefinitionFile(
+                _mobSpawnDefinitions
+                    .Select(spawn => new ExternalMobSpawnDefinition(
+                        spawn.SpawnId,
+                        spawn.ZoneId,
+                        spawn.MobTypeId,
+                        spawn.PositionX,
+                        spawn.PositionY,
+                        spawn.PositionZ,
+                        spawn.Count,
+                        spawn.Radius,
+                        spawn.RoamRadius))
+                    .ToArray()),
+            JsonOptions);
+        File.WriteAllText(path, payload);
+        return path;
+    }
+
+    private sealed record ExternalNpcDefinitionFile(ExternalNpcDefinition[] Npcs);
+
+    private sealed record ExternalNpcDefinition(
+        string NpcId,
+        int ZoneId,
+        string NpcTypeId,
+        string DisplayName,
+        float PositionX,
+        float PositionY,
+        float PositionZ,
+        string PrimaryRole,
+        string[] Services,
+        string GreetingText);
+
+    private sealed record ExternalMobSpawnDefinitionFile(ExternalMobSpawnDefinition[] MobSpawns);
+
+    private sealed record ExternalMobSpawnDefinition(
+        string SpawnId,
+        int ZoneId,
+        string MobTypeId,
+        float PositionX,
+        float PositionY,
+        float PositionZ,
+        int Count,
+        float Radius,
+        float RoamRadius);
+
+    private string ResolveZoneBundleName()
+        => string.IsNullOrWhiteSpace(_definition.AssetBundleName)
+            ? "zone-" + _definition.ZoneId
+            : _definition.AssetBundleName.Trim();
+
+    private static readonly JsonSerializerOptions JsonOptions = new()
+    {
+        PropertyNamingPolicy = JsonNamingPolicy.CamelCase,
+        WriteIndented = true
+    };
 }

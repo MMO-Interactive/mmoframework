@@ -1,0 +1,51 @@
+MMO networking host starting.
+Gateway: TCP 7000
+Dashboard: HTTP 7080
+Accounts: registration + login required at gateway
+Zone control bridge: TCP 7050
+Zone lifecycle: on-demand start, stop after 120 seconds idle
+AOI radius: 36 | ghost margin: 14 | prewarm margin: 20 | transfer inset: 4
+Zone runtime mode: external Unity process (C:\Users\reviv\MMONetworkProject\Builds\ZoneServer\Win64\ZoneServer.exe)
+Warning: external Unity zone runtime currently supports single-zone attach/input/snapshot only.
+Warning: cross-zone handoff orchestration still lives in the in-process .NET ZoneHost.
+info: Microsoft.Hosting.Lifetime[14]
+      Now listening on: http://0.0.0.0:7080
+info: Microsoft.Hosting.Lifetime[0]
+      Application started. Press Ctrl+C to shut down.
+info: Microsoft.Hosting.Lifetime[0]
+      Hosting environment: Production
+info: Microsoft.Hosting.Lifetime[0]
+      Content root path: C:\Users\reviv\MMONetworkProject\Server\MMONetworking.ServerHost
+Management dashboard listening on http://127.0.0.1:7080.
+Zone control bridge listening on TCP 7050.
+Gateway listening on TCP 0.0.0.0:7000.
+info: Microsoft.AspNetCore.Hosting.Diagnostics[1]
+      Request starting HTTP/1.1 GET http://127.0.0.1:7080/api/dashboard - - -
+info: Microsoft.AspNetCore.Hosting.Diagnostics[1]
+      Request starting HTTP/1.1 GET http://127.0.0.1:7080/api/gameplay-definitions - - -
+info: Microsoft.AspNetCore.Hosting.Diagnostics[1]
+      Request starting HTTP/1.1 GET http://127.0.0.1:7080/api/dashboard - - -
+info: Microsoft.AspNetCore.Routing.EndpointMiddleware[0]
+      Executing endpoint 'HTTP: GET /api/dashboard'
+info: Microsoft.AspNetCore.Routing.EndpointMiddleware[0]
+      Executing endpoint 'HTTP: GET /api/gameplay-definitions'
+info: Microsoft.AspNetCore.Routing.EndpointMiddleware[0]
+      Executing endpoint 'HTTP: GET /api/dashboard'
+info: Microsoft.AspNetCore.Http.Result.JsonResult[3]
+      Writing value of type 'DashboardSnapshot' as Json.
+info: Microsoft.AspNetCore.Http.Result.JsonResult[3]
+      Writing value of type 'DashboardSnapshot' as Json.
+info: Microsoft.AspNetCore.Http.Result.JsonResult[3]
+      Writing value of type 'GameplayDefinitionsSnapshot' as Json.
+info: Microsoft.AspNetCore.Routing.EndpointMiddleware[1]
+      Executed endpoint 'HTTP: GET /api/gameplay-definitions'
+info: Microsoft.AspNetCore.Routing.EndpointMiddleware[1]
+      Executed endpoint 'HTTP: GET /api/dashboard'
+info: Microsoft.AspNetCore.Routing.EndpointMiddleware[1]
+      Executed endpoint 'HTTP: GET /api/dashboard'
+info: Microsoft.AspNetCore.Hosting.Diagnostics[2]
+      Request finished HTTP/1.1 GET http://127.0.0.1:7080/api/dashboard - 200 - application/json;+charset=utf-8 110.2812ms
+info: Microsoft.AspNetCore.Hosting.Diagnostics[2]
+      Request finished HTTP/1.1 GET http://127.0.0.1:7080/api/dashboard - 200 - application/json;+charset=utf-8 110.2862ms
+info: Microsoft.AspNetCore.Hosting.Diagnostics[2]
+      Request finished HTTP/1.1 GET http://127.0.0.1:7080/api/gameplay-definitions - 200 - application/json;+charset=utf-8 110.2392ms

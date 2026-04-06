@@ -161,75 +161,186 @@ public sealed class ReputationStore
     {
         using var connection = new SqliteConnection(_connectionString);
         connection.Open();
+        EnsureReputationStateSchema(connection);
+        EnsureReputationActionsSchema(connection);
+    }
 
-        using (var command = connection.CreateCommand())
+    private static void EnsureReputationStateSchema(SqliteConnection connection)
+    {
+        if (!TableExists(connection, "reputation_state"))
         {
-            command.CommandText =
+            CreateCharacterScopedReputationStateTable(connection, "reputation_state");
+        }
+        else if (ColumnExists(connection, "reputation_state", "account_id"))
+        {
+            MigrateLegacyReputationState(connection);
+        }
+
+        using var stateIndex = connection.CreateCommand();
+        stateIndex.CommandText = "CREATE UNIQUE INDEX IF NOT EXISTS ix_reputation_state_character_faction ON reputation_state(character_id, faction_id);";
+        stateIndex.ExecuteNonQuery();
+    }
+
+    private static void EnsureReputationActionsSchema(SqliteConnection connection)
+    {
+        if (!TableExists(connection, "reputation_actions"))
+        {
+            CreateCharacterScopedReputationActionsTable(connection, "reputation_actions");
+        }
+        else if (ColumnExists(connection, "reputation_actions", "account_id"))
+        {
+            MigrateLegacyReputationActions(connection);
+        }
+    }
+
+    private static void MigrateLegacyReputationState(SqliteConnection connection)
+    {
+        CreateCharacterScopedReputationStateTable(connection, "reputation_state_v2");
+
+        using (var migrate = connection.CreateCommand())
+        {
+            migrate.CommandText =
                 """
-                CREATE TABLE IF NOT EXISTS reputation_state (
-                    account_id TEXT NOT NULL,
-                    character_id INTEGER NULL,
-                    faction_id TEXT NOT NULL,
-                    points INTEGER NOT NULL,
-                    updated_at_utc TEXT NOT NULL,
-                    PRIMARY KEY(account_id, faction_id)
-                );
+                INSERT OR REPLACE INTO reputation_state_v2(character_id, faction_id, points, updated_at_utc)
+                SELECT resolved.character_id, resolved.faction_id, resolved.points, resolved.updated_at_utc
+                FROM (
+                    SELECT
+                        CASE
+                            WHEN reputation_state.character_id IS NOT NULL THEN reputation_state.character_id
+                            ELSE (
+                                SELECT primary_character_id
+                                FROM accounts
+                                WHERE accounts.account_id = reputation_state.account_id
+                            )
+                        END AS character_id,
+                        reputation_state.faction_id,
+                        reputation_state.points,
+                        reputation_state.updated_at_utc
+                    FROM reputation_state
+                ) AS resolved
+                WHERE resolved.character_id IS NOT NULL;
                 """;
-            command.ExecuteNonQuery();
+            migrate.ExecuteNonQuery();
         }
 
-        using (var command = connection.CreateCommand())
+        using (var dropLegacy = connection.CreateCommand())
         {
-            command.CommandText =
+            dropLegacy.CommandText = "DROP TABLE reputation_state;";
+            dropLegacy.ExecuteNonQuery();
+        }
+
+        using (var rename = connection.CreateCommand())
+        {
+            rename.CommandText = "ALTER TABLE reputation_state_v2 RENAME TO reputation_state;";
+            rename.ExecuteNonQuery();
+        }
+    }
+
+    private static void MigrateLegacyReputationActions(SqliteConnection connection)
+    {
+        CreateCharacterScopedReputationActionsTable(connection, "reputation_actions_v2");
+
+        using (var migrate = connection.CreateCommand())
+        {
+            migrate.CommandText =
                 """
-                CREATE TABLE IF NOT EXISTS reputation_actions (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    account_id TEXT NOT NULL,
-                    character_id INTEGER NULL,
-                    faction_id TEXT NOT NULL,
-                    amount INTEGER NOT NULL,
-                    reason TEXT NOT NULL,
-                    actor TEXT NOT NULL,
-                    created_at_utc TEXT NOT NULL
-                );
+                INSERT INTO reputation_actions_v2(id, character_id, faction_id, amount, reason, actor, created_at_utc)
+                SELECT
+                    reputation_actions.id,
+                    CASE
+                        WHEN reputation_actions.character_id IS NOT NULL THEN reputation_actions.character_id
+                        ELSE (
+                            SELECT primary_character_id
+                            FROM accounts
+                            WHERE accounts.account_id = reputation_actions.account_id
+                        )
+                    END,
+                    reputation_actions.faction_id,
+                    reputation_actions.amount,
+                    reputation_actions.reason,
+                    reputation_actions.actor,
+                    reputation_actions.created_at_utc
+                FROM reputation_actions
+                WHERE CASE
+                        WHEN reputation_actions.character_id IS NOT NULL THEN reputation_actions.character_id
+                        ELSE (
+                            SELECT primary_character_id
+                            FROM accounts
+                            WHERE accounts.account_id = reputation_actions.account_id
+                        )
+                      END IS NOT NULL;
                 """;
-            command.ExecuteNonQuery();
+            migrate.ExecuteNonQuery();
         }
 
-        using (var migrateState = connection.CreateCommand())
+        using (var dropLegacy = connection.CreateCommand())
         {
-            migrateState.CommandText =
-                """
-                UPDATE reputation_state
-                SET character_id = (
-                    SELECT primary_character_id
-                    FROM accounts
-                    WHERE accounts.account_id = reputation_state.account_id
-                )
-                WHERE character_id IS NULL;
-                """;
-            migrateState.ExecuteNonQuery();
+            dropLegacy.CommandText = "DROP TABLE reputation_actions;";
+            dropLegacy.ExecuteNonQuery();
         }
 
-        using (var migrateActions = connection.CreateCommand())
+        using (var rename = connection.CreateCommand())
         {
-            migrateActions.CommandText =
-                """
-                UPDATE reputation_actions
-                SET character_id = (
-                    SELECT primary_character_id
-                    FROM accounts
-                    WHERE accounts.account_id = reputation_actions.account_id
-                )
-                WHERE character_id IS NULL;
-                """;
-            migrateActions.ExecuteNonQuery();
+            rename.CommandText = "ALTER TABLE reputation_actions_v2 RENAME TO reputation_actions;";
+            rename.ExecuteNonQuery();
+        }
+    }
+
+    private static void CreateCharacterScopedReputationStateTable(SqliteConnection connection, string tableName)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            $"""
+            CREATE TABLE IF NOT EXISTS {tableName} (
+                character_id INTEGER NOT NULL,
+                faction_id TEXT NOT NULL,
+                points INTEGER NOT NULL,
+                updated_at_utc TEXT NOT NULL,
+                PRIMARY KEY(character_id, faction_id)
+            );
+            """;
+        command.ExecuteNonQuery();
+    }
+
+    private static void CreateCharacterScopedReputationActionsTable(SqliteConnection connection, string tableName)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            $"""
+            CREATE TABLE IF NOT EXISTS {tableName} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                character_id INTEGER NOT NULL,
+                faction_id TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                reason TEXT NOT NULL,
+                actor TEXT NOT NULL,
+                created_at_utc TEXT NOT NULL
+            );
+            """;
+        command.ExecuteNonQuery();
+    }
+
+    private static bool TableExists(SqliteConnection connection, string tableName)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = $name LIMIT 1;";
+        command.Parameters.AddWithValue("$name", tableName);
+        return command.ExecuteScalar() != null;
+    }
+
+    private static bool ColumnExists(SqliteConnection connection, string tableName, string columnName)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"PRAGMA table_info({tableName});";
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            if (string.Equals(reader.GetString(1), columnName, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
         }
 
-        using (var stateIndex = connection.CreateCommand())
-        {
-            stateIndex.CommandText = "CREATE UNIQUE INDEX IF NOT EXISTS ix_reputation_state_character_faction ON reputation_state(character_id, faction_id);";
-            stateIndex.ExecuteNonQuery();
-        }
+        return false;
     }
 }

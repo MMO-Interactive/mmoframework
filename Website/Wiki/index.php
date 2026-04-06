@@ -23,229 +23,313 @@ $sessions = is_array($dashData['sessions'] ?? null) ? $dashData['sessions'] : []
 $zoneRuntime = is_array($dashData['zones'] ?? null) ? $dashData['zones'] : [];
 $recipes = is_array($craftData['recipes'] ?? null) ? $craftData['recipes'] : [];
 
-$summary = [
-    'Items' => count($items),
-    'Skills' => count($skills),
-    'Resources' => count($resources),
-    'Nodes' => count($nodes),
-    'Zones' => count($zones),
-    'Live Sessions' => count($sessions),
-    'Crafting Recipes' => count($recipes),
+$runtimeByZoneId = [];
+foreach ($zoneRuntime as $runtime) {
+    $runtimeByZoneId[safe_int($runtime['zoneId'] ?? 0)] = $runtime;
+}
+
+$zonesWithRuntime = [];
+foreach ($zones as $zone) {
+    $zoneId = safe_int($zone['zoneId'] ?? 0);
+    $runtime = $runtimeByZoneId[$zoneId] ?? [];
+    $zonesWithRuntime[] = [
+        'zoneId' => $zoneId,
+        'name' => safe_text($zone['name'] ?? 'Unknown'),
+        'minX' => safe_text($zone['minX'] ?? '0'),
+        'maxX' => safe_text($zone['maxX'] ?? '0'),
+        'minZ' => safe_text($zone['minZ'] ?? '0'),
+        'maxZ' => safe_text($zone['maxZ'] ?? '0'),
+        'players' => safe_int($runtime['activePlayers'] ?? 0),
+        'ghosts' => safe_int($runtime['activeGhosts'] ?? 0),
+        'mobs' => is_array($runtime['mobs'] ?? null) ? count($runtime['mobs']) : 0,
+        'lifecycle' => safe_text($runtime['lifecycleState'] ?? 'Dormant'),
+        'runtimeMode' => safe_text($runtime['runtimeMode'] ?? 'Defined'),
+    ];
+}
+
+usort($zonesWithRuntime, static function (array $left, array $right): int {
+    return [$right['players'], $left['zoneId']] <=> [$left['players'], $right['zoneId']];
+});
+
+$featuredZones = array_slice($zonesWithRuntime, 0, 3);
+$allSkills = $skills;
+usort($allSkills, static function (array $left, array $right): int {
+    return strcasecmp(safe_text($left['name'] ?? ''), safe_text($right['name'] ?? ''));
+});
+$featuredRecipes = array_slice($recipes, 0, 6);
+
+$heroMetrics = [
+    ['value' => count($zones), 'label' => 'Sharded regions'],
+    ['value' => count($skills), 'label' => 'Trainable skills'],
+    ['value' => count($nodes), 'label' => 'Harvest nodes'],
+    ['value' => count($sessions), 'label' => 'Live adventurers'],
 ];
 
-function render_status(array $result): string
+$operationsMetrics = [
+    ['label' => 'Gateway logins', 'value' => safe_int($dashData['gateway']['successfulLogins'] ?? 0)],
+    ['label' => 'Active sessions', 'value' => count($sessions)],
+    ['label' => 'Crafting recipes', 'value' => count($recipes)],
+    ['label' => 'Resource families', 'value' => count($resources)],
+];
+
+$analyticsMetrics = [
+    ['label' => 'Total accounts', 'value' => safe_int($analyticsData['accounts']['totalAccounts'] ?? 0)],
+    ['label' => 'Online accounts', 'value' => safe_int($analyticsData['accounts']['onlineAccounts'] ?? 0)],
+    ['label' => 'Online players', 'value' => safe_int($analyticsData['sessions']['onlinePlayers'] ?? 0)],
+    ['label' => 'Combat actions (24h)', 'value' => safe_int($analyticsData['combat']['actions24h'] ?? 0)],
+];
+
+function render_status_badge(array $result): string
+{
+    $ok = (bool)($result['ok'] ?? false);
+    $class = $ok ? 'status-ok' : 'status-error';
+    $label = $ok ? 'Live' : 'Degraded';
+    return '<span class="status-pill ' . $class . '">' . $label . '</span>';
+}
+
+function render_api_card(string $title, array $result): string
 {
     $ok = (bool)($result['ok'] ?? false);
     $status = safe_int($result['status'] ?? 0);
-    $url = safe_text($result['url'] ?? '');
-    $error = safe_text($result['error'] ?? '');
-    $class = $ok ? 'status-ok' : 'status-error';
+    $detail = $ok
+        ? 'HTTP ' . $status
+        : safe_text($result['error'] ?? 'Unavailable');
 
-    if ($ok) {
-        return sprintf('<li class="%s">%s <span>(HTTP %d)</span></li>', $class, htmlspecialchars($url), $status);
-    }
-
-    return sprintf('<li class="%s">%s <span>(%s)</span></li>', $class, htmlspecialchars($url), htmlspecialchars($error));
+    return sprintf(
+        '<article class="api-card"><div><strong>%s</strong>%s</div><div class="api-detail">%s</div></article>',
+        htmlspecialchars($title),
+        render_status_badge($result),
+        htmlspecialchars($detail)
+    );
 }
+
 ?>
 <!DOCTYPE html>
 <html lang="en">
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width, initial-scale=1" />
-  <title>Sandbox MMO Wiki</title>
+  <title>Rise of Heroes</title>
   <link rel="stylesheet" href="styles.css" />
 </head>
 <body>
-  <header class="topbar">
-    <h1>Sandbox MMO Wiki</h1>
-    <p>Live documentation generated from dashboard APIs at <code><?= htmlspecialchars(api_base_url()) ?></code>.</p>
-  </header>
+  <div class="page-shell">
+    <header class="masthead">
+      <div class="top-strip">
+        <div class="crest">Rise of Heroes</div>
+        <nav class="top-nav">
+          <a href="#world">World</a>
+          <a href="#skills">Skills</a>
+          <a href="#crafting">Crafting</a>
+          <a href="#operations">Operations</a>
+          <a href="/map">Live Map</a>
+        </nav>
+      </div>
 
-  <main class="layout">
-    <aside class="sidebar">
-      <h2>Sections</h2>
-      <nav>
-        <a href="#overview">Overview</a>
-        <a href="#api-health">API Health</a>
-        <a href="#zones">Zones</a>
-        <a href="#items">Items</a>
-        <a href="#skills">Skills</a>
-        <a href="#resources">Resources</a>
-        <a href="#crafting">Crafting</a>
-        <a href="#operations">Operations</a>
-        <a href="#analytics">Analytics</a>
-      </nav>
-    </aside>
+      <div class="hero-ribbon">
+        <div class="hero-ribbon-left">Persistent sandbox MMO</div>
+        <div class="hero-ribbon-center">RISE OF HEROES</div>
+        <div class="hero-ribbon-right"><?= render_status_badge($dashboard) ?></div>
+      </div>
 
-    <section class="content">
-      <article id="overview" class="card">
-        <h2>Overview</h2>
-        <p>This wiki summarizes world, gameplay, and operations data from the running MMO control plane.</p>
-        <div class="metric-grid">
-          <?php foreach ($summary as $label => $value): ?>
-            <div class="metric">
-              <div class="metric-value"><?= safe_int($value) ?></div>
-              <div class="metric-label"><?= htmlspecialchars($label) ?></div>
+      <section class="hero">
+        <div class="hero-copy">
+          <div class="eyebrow">Forge your name into a living world</div>
+          <h1>A skill-based sandbox MMORPG where empires, trade routes, and frontier wars are built by players.</h1>
+          <p>
+            Rise of Heroes is built around long-term progression, territorial expansion, gathering, crafting,
+            and a world simulation that keeps moving while the realm is live.
+          </p>
+          <div class="hero-actions">
+            <a class="btn btn-primary" href="#world">Enter the frontier</a>
+            <a class="btn btn-secondary" href="/map">Watch live world traffic</a>
+          </div>
+          <div class="metric-row">
+            <?php foreach ($heroMetrics as $metric): ?>
+              <div class="metric-pill">
+                <strong><?= safe_int($metric['value']) ?></strong>
+                <span><?= htmlspecialchars($metric['label']) ?></span>
+              </div>
+            <?php endforeach; ?>
+          </div>
+        </div>
+
+        <aside class="hero-panel">
+          <div class="panel-title">Realm pulse</div>
+          <div class="hero-panel-copy">
+            Online accounts, active sessions, and authored world content are pulled directly from the running control plane.
+          </div>
+          <div class="stacked-metrics">
+            <?php foreach ($operationsMetrics as $metric): ?>
+              <div class="stacked-metric">
+                <span><?= htmlspecialchars($metric['label']) ?></span>
+                <strong><?= safe_int($metric['value']) ?></strong>
+              </div>
+            <?php endforeach; ?>
+          </div>
+        </aside>
+      </section>
+    </header>
+
+    <main class="content">
+      <section class="section-grid" id="world">
+        <article class="panel feature-panel">
+          <div class="eyebrow">The promise</div>
+          <h2>Shape a frontier instead of riding a theme park.</h2>
+          <div class="feature-list">
+            <div class="feature-item">
+              <strong>Persistent territory</strong>
+              <span>Zones, resources, mobs, and online activity all exist inside a coherent world coordinate space.</span>
+            </div>
+            <div class="feature-item">
+              <strong>Player-driven economy</strong>
+              <span>Gather, refine, craft, transport, and build long-tail value through production chains.</span>
+            </div>
+            <div class="feature-item">
+              <strong>Skill over class</strong>
+              <span>Characters advance through use, specialization, and sustained effort across dozens of learnable disciplines.</span>
+            </div>
+            <div class="feature-item">
+              <strong>Live operations foundation</strong>
+              <span>The same dashboard stack that powers the server can expose world health, topology, assets, and content data.</span>
+            </div>
+          </div>
+        </article>
+
+        <article class="panel world-panel">
+          <div class="eyebrow">Region overview</div>
+          <h2>Configured world regions</h2>
+          <div class="zone-cards">
+            <?php foreach ($featuredZones as $zone): ?>
+              <div class="zone-card">
+                <div class="zone-card-head">
+                  <strong><?= htmlspecialchars($zone['name']) ?></strong>
+                  <span>Zone <?= safe_int($zone['zoneId']) ?></span>
+                </div>
+                <div class="zone-card-meta">X <?= htmlspecialchars($zone['minX']) ?>-<?= htmlspecialchars($zone['maxX']) ?> / Z <?= htmlspecialchars($zone['minZ']) ?>-<?= htmlspecialchars($zone['maxZ']) ?></div>
+                <div class="zone-card-meta"><?= htmlspecialchars($zone['lifecycle']) ?> · <?= htmlspecialchars($zone['runtimeMode']) ?></div>
+                <div class="zone-card-stats">
+                  <span><?= safe_int($zone['players']) ?> players</span>
+                  <span><?= safe_int($zone['mobs']) ?> mobs</span>
+                  <span><?= safe_int($zone['ghosts']) ?> ghosts</span>
+                </div>
+              </div>
+            <?php endforeach; ?>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel" id="skills">
+        <div class="section-head">
+          <div>
+            <div class="eyebrow">Skill-based progression</div>
+            <h2>Master trades, combat forms, and frontier survival.</h2>
+          </div>
+          <p>
+            No rigid class picks. Rise of Heroes is built around broad skill growth and specialization paths that let one
+            character evolve through labor, warfare, logistics, and craftsmanship. The live skill catalog currently defines
+            <strong><?= count($allSkills) ?></strong> trainable disciplines.
+          </p>
+        </div>
+        <div class="skill-grid">
+          <?php foreach ($allSkills as $skill): ?>
+            <div class="skill-tile">
+              <strong><?= htmlspecialchars(safe_text($skill['name'] ?? 'Unknown')) ?></strong>
+              <span><?= htmlspecialchars(str_replace('_', ' ', safe_text($skill['id'] ?? ''))) ?></span>
+              <span>Cap <?= safe_int($skill['maxValue'] ?? 0) ?></span>
             </div>
           <?php endforeach; ?>
         </div>
-      </article>
+      </section>
 
-      <article id="api-health" class="card">
-        <h2>API Health</h2>
-        <ul class="status-list">
-          <?= render_status($definitions) ?>
-          <?= render_status($dashboard) ?>
-          <?= render_status($crafting) ?>
-          <?= render_status($analytics) ?>
-        </ul>
-      </article>
-
-      <article id="zones" class="card">
-        <h2>Zones</h2>
-        <table>
-          <thead><tr><th>ID</th><th>Name</th><th>Bounds X</th><th>Bounds Z</th><th>Active Players</th><th>Lifecycle</th></tr></thead>
-          <tbody>
-            <?php foreach ($zones as $zone):
-              $active = 0;
-              $lifecycle = '';
-              foreach ($zoneRuntime as $runtime) {
-                  if (safe_int($runtime['zoneId'] ?? 0) === safe_int($zone['zoneId'] ?? 0)) {
-                      $active = safe_int($runtime['activePlayers'] ?? 0);
-                      $lifecycle = safe_text($runtime['lifecycleState'] ?? '');
-                      break;
-                  }
-              }
-            ?>
-              <tr>
-                <td><?= safe_int($zone['zoneId'] ?? 0) ?></td>
-                <td><?= htmlspecialchars(safe_text($zone['name'] ?? '')) ?></td>
-                <td><?= htmlspecialchars(safe_text($zone['minX'] ?? '0')) ?> to <?= htmlspecialchars(safe_text($zone['maxX'] ?? '0')) ?></td>
-                <td><?= htmlspecialchars(safe_text($zone['minZ'] ?? '0')) ?> to <?= htmlspecialchars(safe_text($zone['maxZ'] ?? '0')) ?></td>
-                <td><?= $active ?></td>
-                <td><?= htmlspecialchars($lifecycle) ?></td>
-              </tr>
-            <?php endforeach; ?>
-          </tbody>
-        </table>
-      </article>
-
-      <article id="items" class="card">
-        <h2>Items</h2>
-        <table>
-          <thead><tr><th>ID</th><th>Name</th><th>Max Stack</th><th>Base Weight</th></tr></thead>
-          <tbody>
-            <?php foreach ($items as $item): ?>
-              <tr>
-                <td><code><?= htmlspecialchars(safe_text($item['id'] ?? '')) ?></code></td>
-                <td><?= htmlspecialchars(safe_text($item['name'] ?? '')) ?></td>
-                <td><?= safe_int($item['maxStack'] ?? 0) ?></td>
-                <td><?= htmlspecialchars(safe_text($item['baseWeight'] ?? '0')) ?></td>
-              </tr>
-            <?php endforeach; ?>
-          </tbody>
-        </table>
-      </article>
-
-      <article id="skills" class="card">
-        <h2>Skills</h2>
-        <table>
-          <thead><tr><th>ID</th><th>Name</th><th>Max Value</th></tr></thead>
-          <tbody>
-            <?php foreach ($skills as $skill): ?>
-              <tr>
-                <td><code><?= htmlspecialchars(safe_text($skill['id'] ?? '')) ?></code></td>
-                <td><?= htmlspecialchars(safe_text($skill['name'] ?? '')) ?></td>
-                <td><?= safe_int($skill['maxValue'] ?? 0) ?></td>
-              </tr>
-            <?php endforeach; ?>
-          </tbody>
-        </table>
-      </article>
-
-      <article id="resources" class="card">
-        <h2>Resources & Nodes</h2>
-        <h3>Resource Definitions</h3>
-        <table>
-          <thead><tr><th>ID</th><th>Name</th><th>Item</th><th>Base Yield</th></tr></thead>
-          <tbody>
-            <?php foreach ($resources as $resource): ?>
-              <tr>
-                <td><code><?= htmlspecialchars(safe_text($resource['id'] ?? '')) ?></code></td>
-                <td><?= htmlspecialchars(safe_text($resource['name'] ?? '')) ?></td>
-                <td><code><?= htmlspecialchars(safe_text($resource['itemId'] ?? '')) ?></code></td>
-                <td><?= safe_int($resource['baseYield'] ?? 0) ?></td>
-              </tr>
-            <?php endforeach; ?>
-          </tbody>
-        </table>
-
-        <h3>Node Instances</h3>
-        <table>
-          <thead><tr><th>ID</th><th>Zone</th><th>Resource</th><th>Position</th><th>Respawn(s)</th></tr></thead>
-          <tbody>
-            <?php foreach ($nodes as $node): ?>
-              <tr>
-                <td><code><?= htmlspecialchars(safe_text($node['id'] ?? '')) ?></code></td>
-                <td><?= safe_int($node['zoneId'] ?? 0) ?></td>
-                <td><code><?= htmlspecialchars(safe_text($node['resourceId'] ?? '')) ?></code></td>
-                <td>(<?= htmlspecialchars(safe_text($node['positionX'] ?? '0')) ?>, <?= htmlspecialchars(safe_text($node['positionY'] ?? '0')) ?>, <?= htmlspecialchars(safe_text($node['positionZ'] ?? '0')) ?>)</td>
-                <td><?= safe_int($node['respawnSeconds'] ?? 0) ?></td>
-              </tr>
-            <?php endforeach; ?>
-          </tbody>
-        </table>
-      </article>
-
-      <article id="crafting" class="card">
-        <h2>Crafting Recipes</h2>
-        <table>
-          <thead><tr><th>Recipe</th><th>Output</th><th>Craft Seconds</th><th>Ingredients</th></tr></thead>
-          <tbody>
-            <?php foreach ($recipes as $recipe):
-              $ingredients = is_array($recipe['ingredients'] ?? null) ? $recipe['ingredients'] : [];
-              $parts = [];
-              foreach ($ingredients as $ingredient) {
-                  $parts[] = safe_int($ingredient['quantity'] ?? 0) . '× ' . safe_text($ingredient['itemId'] ?? '');
-              }
-            ?>
-              <tr>
-                <td><code><?= htmlspecialchars(safe_text($recipe['recipeId'] ?? '')) ?></code><br/><?= htmlspecialchars(safe_text($recipe['name'] ?? '')) ?></td>
-                <td><?= safe_int($recipe['outputQuantity'] ?? 0) ?>× <code><?= htmlspecialchars(safe_text($recipe['outputItemId'] ?? '')) ?></code></td>
-                <td><?= safe_int($recipe['craftSeconds'] ?? 0) ?></td>
-                <td><?= htmlspecialchars(implode(', ', $parts)) ?></td>
-              </tr>
-            <?php endforeach; ?>
-          </tbody>
-        </table>
-      </article>
-
-      <article id="operations" class="card">
-        <h2>Operations Snapshot</h2>
-        <p>Gateway attempts: <strong><?= safe_int($dashData['gateway']['connectionAttempts'] ?? 0) ?></strong></p>
-        <p>Gateway successful logins: <strong><?= safe_int($dashData['gateway']['successfulLogins'] ?? 0) ?></strong></p>
-        <p>Gateway errors: <strong><?= safe_int($dashData['gateway']['errors'] ?? 0) ?></strong></p>
-        <p>Sessions in memory: <strong><?= count($sessions) ?></strong></p>
-      </article>
-
-      <article id="analytics" class="card">
-        <h2>Derived Analytics</h2>
-        <p>This section reflects `/api/analytics/overview` from the dashboard.</p>
-        <?php if ($analytics['ok']): ?>
-          <div class="metric-grid">
-            <div class="metric"><div class="metric-value"><?= safe_int($analyticsData['accounts']['totalAccounts'] ?? 0) ?></div><div class="metric-label">Total Accounts</div></div>
-            <div class="metric"><div class="metric-value"><?= safe_int($analyticsData['accounts']['onlineAccounts'] ?? 0) ?></div><div class="metric-label">Online Accounts</div></div>
-            <div class="metric"><div class="metric-value"><?= safe_int($analyticsData['sessions']['onlinePlayers'] ?? 0) ?></div><div class="metric-label">Online Players</div></div>
-            <div class="metric"><div class="metric-value"><?= safe_int($analyticsData['combat']['actions24h'] ?? 0) ?></div><div class="metric-label">Combat Actions (24h)</div></div>
-            <div class="metric"><div class="metric-value"><?= safe_int($analyticsData['combat']['damage24h'] ?? 0) ?></div><div class="metric-label">Damage (24h)</div></div>
-            <div class="metric"><div class="metric-value"><?= safe_int($analyticsData['content']['craftingRecipes'] ?? 0) ?></div><div class="metric-label">Craft Recipes</div></div>
+      <section class="section-grid" id="crafting">
+        <article class="panel">
+          <div class="eyebrow">Resource game</div>
+          <h2>Gathering starts in the world.</h2>
+          <p class="section-copy">
+            Resource definitions and node placements are live-authored. Harvestable nodes, active resource families,
+            and crafting outputs all flow from the same control plane.
+          </p>
+          <div class="resource-strip">
+            <div class="resource-stat"><strong><?= count($resources) ?></strong><span>Resource families</span></div>
+            <div class="resource-stat"><strong><?= count($nodes) ?></strong><span>Placed nodes</span></div>
+            <div class="resource-stat"><strong><?= count($items) ?></strong><span>Item definitions</span></div>
           </div>
-        <?php else: ?>
-          <p class="status-error">Analytics API unavailable: <?= htmlspecialchars(safe_text($analytics['error'] ?? 'unknown error')) ?></p>
-        <?php endif; ?>
-      </article>
-    </section>
-  </main>
+        </article>
+
+        <article class="panel">
+          <div class="eyebrow">Crafting examples</div>
+          <h2>First-pass production recipes</h2>
+          <div class="recipe-list">
+            <?php foreach ($featuredRecipes as $recipe): ?>
+              <?php
+                $ingredients = is_array($recipe['ingredients'] ?? null) ? $recipe['ingredients'] : [];
+                $parts = [];
+                foreach ($ingredients as $ingredient) {
+                    $parts[] = safe_int($ingredient['quantity'] ?? 0) . 'x ' . safe_text($ingredient['itemId'] ?? '');
+                }
+              ?>
+              <div class="recipe-item">
+                <div class="recipe-title">
+                  <strong><?= htmlspecialchars(safe_text($recipe['name'] ?? 'Unknown Recipe')) ?></strong>
+                  <span><?= safe_int($recipe['craftSeconds'] ?? 0) ?>s</span>
+                </div>
+                <div class="recipe-output"><?= safe_int($recipe['outputQuantity'] ?? 0) ?>x <?= htmlspecialchars(safe_text($recipe['outputItemId'] ?? '')) ?></div>
+                <div class="recipe-ingredients"><?= htmlspecialchars(implode(' • ', $parts)) ?></div>
+              </div>
+            <?php endforeach; ?>
+          </div>
+        </article>
+      </section>
+
+      <section class="panel" id="operations">
+        <div class="section-head">
+          <div>
+            <div class="eyebrow">Live world operations</div>
+            <h2>Built to be observed while it runs.</h2>
+          </div>
+          <p>
+            This website is driven from the same dashboard APIs used by the control plane. It can surface authored content,
+            live traffic, and live-ops health without leaving the running world.
+          </p>
+        </div>
+
+        <div class="ops-grid">
+          <div class="ops-column">
+            <h3>Realm status</h3>
+            <div class="mini-metrics">
+              <?php foreach ($analyticsMetrics as $metric): ?>
+                <div class="mini-metric">
+                  <span><?= htmlspecialchars($metric['label']) ?></span>
+                  <strong><?= safe_int($metric['value']) ?></strong>
+                </div>
+              <?php endforeach; ?>
+            </div>
+          </div>
+
+          <div class="ops-column">
+            <h3>API health</h3>
+            <div class="api-grid">
+              <?= render_api_card('Gameplay definitions', $definitions) ?>
+              <?= render_api_card('Dashboard snapshot', $dashboard) ?>
+              <?= render_api_card('Crafting recipes', $crafting) ?>
+              <?= render_api_card('Analytics overview', $analytics) ?>
+            </div>
+          </div>
+        </div>
+      </section>
+
+      <section class="cta-banner">
+        <div>
+          <div class="eyebrow">Rise with the realm</div>
+          <h2>Stand up cities, control trade, and leave a permanent mark on the frontier.</h2>
+        </div>
+        <div class="cta-actions">
+          <a class="btn btn-primary" href="/map">Open operations map</a>
+          <a class="btn btn-secondary" href="<?= htmlspecialchars(api_base_url()) ?>">Open control plane</a>
+        </div>
+      </section>
+    </main>
+  </div>
 </body>
 </html>

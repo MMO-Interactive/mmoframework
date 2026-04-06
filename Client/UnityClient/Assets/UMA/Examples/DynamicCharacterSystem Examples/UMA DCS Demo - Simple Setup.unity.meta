@@ -1,0 +1,15 @@
+fileFormatVersion: 2
+guid: 8ad72cdcbe3186c4fae3fed42c3a09a8
+DefaultImporter:
+  externalObjects: {}
+  userData: 
+  assetBundleName: 
+  assetBundleVariant: 
+AssetOrigin:
+  serializedVersion: 1
+  productId: 35611
+  packageName: UMA 2
+  packageVersion: 2.14f6
+  assetPath: Assets/UMA/Examples/DynamicCharacterSystem Examples/UMA DCS Demo - Simple
+    Setup.unity
+  uploadId: 771830

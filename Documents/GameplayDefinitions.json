@@ -1,0 +1,80 @@
+{
+  "items": [
+    {
+      "id": "log",
+      "name": "Wood Log",
+      "maxStack": 200,
+      "baseWeight": 1
+    },
+    {
+      "id": "ore",
+      "name": "Iron Ore",
+      "maxStack": 200,
+      "baseWeight": 1.5
+    }
+  ],
+  "skills": [
+    {
+      "id": "gathering",
+      "name": "Gathering",
+      "maxValue": 100
+    },
+    {
+      "id": "mining",
+      "name": "Mining",
+      "maxValue": 100
+    }
+  ],
+  "resources": [
+    {
+      "id": "tree",
+      "name": "Tree",
+      "itemId": "log",
+      "baseYield": 1
+    },
+    {
+      "id": "ore_vein",
+      "name": "Ore Vein",
+      "itemId": "ore",
+      "baseYield": 1
+    }
+  ],
+  "nodes": [
+    {
+      "id": "tree-1",
+      "zoneId": 1,
+      "resourceId": "tree",
+      "positionX": 10,
+      "positionY": 0,
+      "positionZ": 45,
+      "respawnSeconds": 8
+    },
+    {
+      "id": "ore-1",
+      "zoneId": 1,
+      "resourceId": "ore_vein",
+      "positionX": 15,
+      "positionY": 0,
+      "positionZ": 55,
+      "respawnSeconds": 8
+    }
+  ],
+  "zones": [
+    {
+      "zoneId": 1,
+      "name": "NorthField",
+      "minX": 0,
+      "maxX": 100,
+      "minZ": 0,
+      "maxZ": 100
+    },
+    {
+      "zoneId": 2,
+      "name": "SouthField",
+      "minX": 100,
+      "maxX": 200,
+      "minZ": 0,
+      "maxZ": 100
+    }
+  ]
+}

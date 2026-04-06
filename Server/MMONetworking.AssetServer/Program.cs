@@ -1,5 +1,12 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using System.Linq;
 using System.Security.Cryptography;
 using System.Text.Json;
+using System.Threading;
+using Microsoft.AspNetCore.Builder;
+using Microsoft.AspNetCore.Http;
 using Microsoft.Data.Sqlite;
 
 var builder = WebApplication.CreateBuilder(args);
@@ -45,58 +52,70 @@ app.MapPost("/api/assets/artifacts", async (HttpContext context, CancellationTok
     var expectedHash = context.Request.Query["expectedHash"].ToString().Trim().ToLowerInvariant();
 
     var tempPath = Path.Combine(dataRoot, $"upload-{Guid.NewGuid():N}.tmp");
-    await using var destination = File.Create(tempPath);
     using var sha = SHA256.Create();
-
-    var buffer = new byte[128 * 1024];
     long totalBytes = 0;
-    while (true)
-    {
-        var read = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
-        if (read <= 0)
-        {
-            break;
-        }
+    string hash = string.Empty;
 
-        await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
-        sha.TransformBlock(buffer, 0, read, null, 0);
-        totalBytes += read;
-        if (totalBytes > maxUploadBytes)
+    try
+    {
+        await using (var destination = File.Create(tempPath))
         {
+            var buffer = new byte[128 * 1024];
+            while (true)
+            {
+                var read = await stream.ReadAsync(buffer, cancellationToken).ConfigureAwait(false);
+                if (read <= 0)
+                {
+                    break;
+                }
+
+                await destination.WriteAsync(buffer.AsMemory(0, read), cancellationToken).ConfigureAwait(false);
+                sha.TransformBlock(buffer, 0, read, null, 0);
+                totalBytes += read;
+                if (totalBytes > maxUploadBytes)
+                {
+                    await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
+                    return Results.BadRequest(new { error = $"Upload exceeded max size limit of {maxUploadBytes} bytes." });
+                }
+            }
+
+            sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
             await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
-            destination.Close();
-            File.Delete(tempPath);
-            return Results.BadRequest(new { error = $"Upload exceeded max size limit of {maxUploadBytes} bytes." });
         }
-    }
 
-    sha.TransformFinalBlock(Array.Empty<byte>(), 0, 0);
-    await destination.FlushAsync(cancellationToken).ConfigureAwait(false);
+        hash = Convert.ToHexString(sha.Hash ?? Array.Empty<byte>()).ToLowerInvariant();
+        if (string.IsNullOrWhiteSpace(hash))
+        {
+            return Results.BadRequest(new { error = "Could not compute content hash." });
+        }
 
-    var hash = Convert.ToHexStringLower(sha.Hash ?? Array.Empty<byte>());
-    if (string.IsNullOrWhiteSpace(hash))
-    {
-        File.Delete(tempPath);
-        return Results.BadRequest(new { error = "Could not compute content hash." });
-    }
-    if (!string.IsNullOrWhiteSpace(expectedHash) && !string.Equals(expectedHash, hash, StringComparison.Ordinal))
-    {
-        File.Delete(tempPath);
-        return Results.BadRequest(new { error = $"Hash mismatch. expected={expectedHash} actual={hash}" });
-    }
+        if (!string.IsNullOrWhiteSpace(expectedHash) && !string.Equals(expectedHash, hash, StringComparison.Ordinal))
+        {
+            return Results.BadRequest(new { error = $"Hash mismatch. expected={expectedHash} actual={hash}" });
+        }
 
-    var artifactPath = Path.Combine(dataRoot, "artifacts", hash);
-    if (File.Exists(artifactPath))
-    {
-        File.Delete(tempPath);
-    }
-    else
-    {
-        File.Move(tempPath, artifactPath);
-    }
+        var artifactPath = Path.Combine(dataRoot, "artifacts", hash);
+        if (File.Exists(artifactPath))
+        {
+            File.Delete(tempPath);
+        }
+        else
+        {
+            File.Move(tempPath, artifactPath);
+        }
 
-    var artifact = store.UpsertArtifact(hash, sourceName, totalBytes, "application/octet-stream");
-    return Results.Ok(artifact);
+        var artifact = store.UpsertArtifact(hash, sourceName, totalBytes, "application/octet-stream");
+        return Results.Ok(artifact);
+    }
+    catch
+    {
+        if (File.Exists(tempPath))
+        {
+            File.Delete(tempPath);
+        }
+
+        throw;
+    }
 });
 
 app.MapGet("/api/assets/artifacts/{hash}", (string hash) =>
@@ -719,7 +738,7 @@ VALUES ($channel, $manifest, $actor, $promoted);";
         var entries = new List<object>();
         using var command = connection.CreateCommand();
         command.CommandText = @"
-SELECT e.bundle_name, e.platform, b.version, b.artifact_hash, b.unity_version
+SELECT e.bundle_name, e.platform, b.version, b.artifact_hash, b.unity_version, b.bundle_version_id
 FROM manifest_entries e
 JOIN bundle_versions b ON b.bundle_version_id = e.bundle_version_id
 WHERE e.manifest_id = $manifest
@@ -735,6 +754,7 @@ ORDER BY e.bundle_name ASC;";
                 bundleName = reader.GetString(0),
                 platform = reader.GetString(1),
                 version = reader.GetString(2),
+                bundleVersionId = reader.GetInt64(5),
                 artifactHash = reader.GetString(3),
                 unityVersion = reader.GetString(4),
                 downloadUrl = $"/api/assets/artifacts/{reader.GetString(3)}"

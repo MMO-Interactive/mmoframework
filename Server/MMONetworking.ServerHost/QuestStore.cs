@@ -13,6 +13,7 @@ public sealed class QuestStore
     {
         _connectionString = new SqliteConnectionStringBuilder { DataSource = databasePath }.ToString();
         EnsureSchema();
+        SeedDefaultsIfEmpty();
     }
 
     public QuestBoardSnapshot GetBoard(ulong characterId)
@@ -45,9 +46,9 @@ public sealed class QuestStore
             command.CommandText =
                 """
                 INSERT INTO quest_definitions(
-                    quest_id, title, description, target_action, target_count, reward_xp, reward_reputation_faction, reward_reputation_amount, updated_at_utc, updated_by)
+                    quest_id, title, description, target_action, target_count, reward_xp, reward_reputation_faction, reward_reputation_amount, giver_npc_id, updated_at_utc, updated_by)
                 VALUES(
-                    $id, $title, $description, $targetAction, $targetCount, $rewardXp, $rewardFaction, $rewardAmount, $updated, $actor)
+                    $id, $title, $description, $targetAction, $targetCount, $rewardXp, $rewardFaction, $rewardAmount, $giverNpcId, $updated, $actor)
                 ON CONFLICT(quest_id) DO UPDATE SET
                     title = excluded.title,
                     description = excluded.description,
@@ -56,6 +57,7 @@ public sealed class QuestStore
                     reward_xp = excluded.reward_xp,
                     reward_reputation_faction = excluded.reward_reputation_faction,
                     reward_reputation_amount = excluded.reward_reputation_amount,
+                    giver_npc_id = excluded.giver_npc_id,
                     updated_at_utc = excluded.updated_at_utc,
                     updated_by = excluded.updated_by;
                 """;
@@ -67,6 +69,7 @@ public sealed class QuestStore
             command.Parameters.AddWithValue("$rewardXp", Math.Max(0, quest.RewardExperience));
             command.Parameters.AddWithValue("$rewardFaction", quest.RewardReputationFaction ?? string.Empty);
             command.Parameters.AddWithValue("$rewardAmount", quest.RewardReputationAmount);
+            command.Parameters.AddWithValue("$giverNpcId", quest.GiverNpcId ?? string.Empty);
             command.Parameters.AddWithValue("$updated", DateTimeOffset.UtcNow.ToString("O"));
             command.Parameters.AddWithValue("$actor", string.IsNullOrWhiteSpace(actor) ? "dashboard" : actor.Trim());
             command.ExecuteNonQuery();
@@ -96,7 +99,7 @@ public sealed class QuestStore
                 command.Transaction = tx;
                 command.CommandText =
                     """
-                    INSERT INTO quest_progress(account_id, quest_id, progress_count, is_completed, is_claimed, updated_at_utc)
+                    INSERT INTO quest_progress(character_id, quest_id, progress_count, is_completed, is_claimed, updated_at_utc)
                     VALUES($characterId, $questId, $amount, 0, 0, $updated)
                     ON CONFLICT(character_id, quest_id) DO UPDATE SET
                         progress_count = progress_count + excluded.progress_count,
@@ -153,7 +156,7 @@ public sealed class QuestStore
                 command.Transaction = tx;
                 command.CommandText =
                     """
-                    INSERT INTO quest_progress(account_id, quest_id, progress_count, is_completed, is_claimed, updated_at_utc)
+                    INSERT INTO quest_progress(character_id, quest_id, progress_count, is_completed, is_claimed, updated_at_utc)
                     SELECT $characterId, quest_id, $amount, 0, 0, $updated
                     FROM quest_definitions
                     WHERE target_action = $action
@@ -274,7 +277,7 @@ public sealed class QuestStore
         {
             command.CommandText =
                 """
-                SELECT quest_id, title, description, target_action, target_count, reward_xp, reward_reputation_faction, reward_reputation_amount
+                SELECT quest_id, title, description, target_action, target_count, reward_xp, reward_reputation_faction, reward_reputation_amount, giver_npc_id
                 FROM quest_definitions
                 ORDER BY quest_id;
                 """;
@@ -289,7 +292,8 @@ public sealed class QuestStore
                     reader.GetInt32(4),
                     reader.GetInt32(5),
                     reader.GetString(6),
-                    reader.GetInt32(7)));
+                    reader.GetInt32(7),
+                    reader.GetString(8)));
             }
         }
 
@@ -372,7 +376,7 @@ public sealed class QuestStore
         command.Transaction = tx;
         command.CommandText =
             """
-            SELECT quest_id, title, description, target_action, target_count, reward_xp, reward_reputation_faction, reward_reputation_amount
+            SELECT quest_id, title, description, target_action, target_count, reward_xp, reward_reputation_faction, reward_reputation_amount, giver_npc_id
             FROM quest_definitions
             WHERE quest_id = $questId
             LIMIT 1;
@@ -392,7 +396,8 @@ public sealed class QuestStore
             reader.GetInt32(4),
             reader.GetInt32(5),
             reader.GetString(6),
-            reader.GetInt32(7));
+            reader.GetInt32(7),
+            reader.GetString(8));
     }
 
     private static QuestProgressSnapshot? LoadProgress(SqliteConnection connection, SqliteTransaction tx, ulong characterId, string questId)
@@ -427,7 +432,13 @@ public sealed class QuestStore
     {
         using var connection = new SqliteConnection(_connectionString);
         connection.Open();
+        EnsureDefinitionsSchema(connection);
+        EnsureQuestProgressSchema(connection);
+        EnsureQuestEventsSchema(connection);
+    }
 
+    private static void EnsureDefinitionsSchema(SqliteConnection connection)
+    {
         using (var command = connection.CreateCommand())
         {
             command.CommandText =
@@ -441,6 +452,7 @@ public sealed class QuestStore
                     reward_xp INTEGER NOT NULL,
                     reward_reputation_faction TEXT NOT NULL,
                     reward_reputation_amount INTEGER NOT NULL,
+                    giver_npc_id TEXT NOT NULL DEFAULT '',
                     updated_at_utc TEXT NOT NULL,
                     updated_by TEXT NOT NULL
                 );
@@ -448,79 +460,226 @@ public sealed class QuestStore
             command.ExecuteNonQuery();
         }
 
-        using (var command = connection.CreateCommand())
+        using var alter = connection.CreateCommand();
+        alter.CommandText = "ALTER TABLE quest_definitions ADD COLUMN giver_npc_id TEXT NOT NULL DEFAULT '';";
+        try
         {
-            command.CommandText =
-                """
-                CREATE TABLE IF NOT EXISTS quest_progress (
-                    account_id TEXT NOT NULL,
-                    character_id INTEGER NULL,
-                    quest_id TEXT NOT NULL,
-                    progress_count INTEGER NOT NULL,
-                    is_completed INTEGER NOT NULL,
-                    is_claimed INTEGER NOT NULL,
-                    updated_at_utc TEXT NOT NULL,
-                    PRIMARY KEY(account_id, quest_id)
-                );
-                """;
-            command.ExecuteNonQuery();
+            alter.ExecuteNonQuery();
+        }
+        catch (SqliteException)
+        {
+        }
+    }
+
+    private static void EnsureQuestProgressSchema(SqliteConnection connection)
+    {
+        if (!TableExists(connection, "quest_progress"))
+        {
+            CreateCharacterScopedQuestProgressTable(connection, "quest_progress");
+        }
+        else if (ColumnExists(connection, "quest_progress", "account_id"))
+        {
+            MigrateLegacyQuestProgress(connection);
         }
 
-        using (var command = connection.CreateCommand())
+        using var index = connection.CreateCommand();
+        index.CommandText = """
+            CREATE UNIQUE INDEX IF NOT EXISTS ix_quest_progress_character_quest
+            ON quest_progress(character_id, quest_id);
+            """;
+        index.ExecuteNonQuery();
+    }
+
+    private static void EnsureQuestEventsSchema(SqliteConnection connection)
+    {
+        if (!TableExists(connection, "quest_events"))
         {
-            command.CommandText =
+            CreateCharacterScopedQuestEventsTable(connection, "quest_events");
+        }
+        else if (ColumnExists(connection, "quest_events", "account_id"))
+        {
+            MigrateLegacyQuestEvents(connection);
+        }
+    }
+
+    private static void MigrateLegacyQuestProgress(SqliteConnection connection)
+    {
+        CreateCharacterScopedQuestProgressTable(connection, "quest_progress_v2");
+
+        using (var migrate = connection.CreateCommand())
+        {
+            migrate.CommandText =
                 """
-                CREATE TABLE IF NOT EXISTS quest_events (
-                    id INTEGER PRIMARY KEY AUTOINCREMENT,
-                    account_id TEXT NOT NULL,
-                    character_id INTEGER NULL,
-                    quest_id TEXT NOT NULL,
-                    event_type TEXT NOT NULL,
-                    amount INTEGER NOT NULL,
-                    notes TEXT NOT NULL,
-                    created_at_utc TEXT NOT NULL
-                );
+                INSERT OR REPLACE INTO quest_progress_v2(character_id, quest_id, progress_count, is_completed, is_claimed, updated_at_utc)
+                SELECT resolved.character_id, resolved.quest_id, resolved.progress_count, resolved.is_completed, resolved.is_claimed, resolved.updated_at_utc
+                FROM (
+                    SELECT
+                        CASE
+                            WHEN quest_progress.character_id IS NOT NULL THEN quest_progress.character_id
+                            ELSE (
+                                SELECT primary_character_id
+                                FROM accounts
+                                WHERE accounts.account_id = quest_progress.account_id
+                            )
+                        END AS character_id,
+                        quest_progress.quest_id,
+                        quest_progress.progress_count,
+                        quest_progress.is_completed,
+                        quest_progress.is_claimed,
+                        quest_progress.updated_at_utc
+                    FROM quest_progress
+                ) AS resolved
+                WHERE resolved.character_id IS NOT NULL;
                 """;
-            command.ExecuteNonQuery();
+            migrate.ExecuteNonQuery();
         }
 
-        using (var command = connection.CreateCommand())
+        using (var dropLegacy = connection.CreateCommand())
         {
-            command.CommandText =
-                """
-                UPDATE quest_progress
-                SET character_id = (
-                    SELECT primary_character_id
-                    FROM accounts
-                    WHERE accounts.account_id = quest_progress.account_id
-                )
-                WHERE character_id IS NULL;
-                """;
-            command.ExecuteNonQuery();
+            dropLegacy.CommandText = "DROP TABLE quest_progress;";
+            dropLegacy.ExecuteNonQuery();
         }
 
-        using (var command = connection.CreateCommand())
+        using (var rename = connection.CreateCommand())
         {
-            command.CommandText =
+            rename.CommandText = "ALTER TABLE quest_progress_v2 RENAME TO quest_progress;";
+            rename.ExecuteNonQuery();
+        }
+    }
+
+    private static void MigrateLegacyQuestEvents(SqliteConnection connection)
+    {
+        CreateCharacterScopedQuestEventsTable(connection, "quest_events_v2");
+
+        using (var migrate = connection.CreateCommand())
+        {
+            migrate.CommandText =
                 """
-                UPDATE quest_events
-                SET character_id = (
-                    SELECT primary_character_id
-                    FROM accounts
-                    WHERE accounts.account_id = quest_events.account_id
-                )
-                WHERE character_id IS NULL;
+                INSERT INTO quest_events_v2(id, character_id, quest_id, event_type, amount, notes, created_at_utc)
+                SELECT
+                    quest_events.id,
+                    CASE
+                        WHEN quest_events.character_id IS NOT NULL THEN quest_events.character_id
+                        ELSE (
+                            SELECT primary_character_id
+                            FROM accounts
+                            WHERE accounts.account_id = quest_events.account_id
+                        )
+                    END,
+                    quest_events.quest_id,
+                    quest_events.event_type,
+                    quest_events.amount,
+                    quest_events.notes,
+                    quest_events.created_at_utc
+                FROM quest_events
+                WHERE CASE
+                        WHEN quest_events.character_id IS NOT NULL THEN quest_events.character_id
+                        ELSE (
+                            SELECT primary_character_id
+                            FROM accounts
+                            WHERE accounts.account_id = quest_events.account_id
+                        )
+                      END IS NOT NULL;
                 """;
-            command.ExecuteNonQuery();
+            migrate.ExecuteNonQuery();
         }
 
-        using (var command = connection.CreateCommand())
+        using (var dropLegacy = connection.CreateCommand())
         {
-            command.CommandText = """
-                CREATE UNIQUE INDEX IF NOT EXISTS ix_quest_progress_character_quest
-                ON quest_progress(character_id, quest_id);
-                """;
-            command.ExecuteNonQuery();
+            dropLegacy.CommandText = "DROP TABLE quest_events;";
+            dropLegacy.ExecuteNonQuery();
         }
+
+        using (var rename = connection.CreateCommand())
+        {
+            rename.CommandText = "ALTER TABLE quest_events_v2 RENAME TO quest_events;";
+            rename.ExecuteNonQuery();
+        }
+    }
+
+    private static void CreateCharacterScopedQuestProgressTable(SqliteConnection connection, string tableName)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            $"""
+            CREATE TABLE IF NOT EXISTS {tableName} (
+                character_id INTEGER NOT NULL,
+                quest_id TEXT NOT NULL,
+                progress_count INTEGER NOT NULL,
+                is_completed INTEGER NOT NULL,
+                is_claimed INTEGER NOT NULL,
+                updated_at_utc TEXT NOT NULL,
+                PRIMARY KEY(character_id, quest_id)
+            );
+            """;
+        command.ExecuteNonQuery();
+    }
+
+    private static void CreateCharacterScopedQuestEventsTable(SqliteConnection connection, string tableName)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText =
+            $"""
+            CREATE TABLE IF NOT EXISTS {tableName} (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                character_id INTEGER NOT NULL,
+                quest_id TEXT NOT NULL,
+                event_type TEXT NOT NULL,
+                amount INTEGER NOT NULL,
+                notes TEXT NOT NULL,
+                created_at_utc TEXT NOT NULL
+            );
+            """;
+        command.ExecuteNonQuery();
+    }
+
+    private static bool TableExists(SqliteConnection connection, string tableName)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = $name LIMIT 1;";
+        command.Parameters.AddWithValue("$name", tableName);
+        return command.ExecuteScalar() != null;
+    }
+
+    private static bool ColumnExists(SqliteConnection connection, string tableName, string columnName)
+    {
+        using var command = connection.CreateCommand();
+        command.CommandText = $"PRAGMA table_info({tableName});";
+        using var reader = command.ExecuteReader();
+        while (reader.Read())
+        {
+            if (string.Equals(reader.GetString(1), columnName, StringComparison.OrdinalIgnoreCase))
+            {
+                return true;
+            }
+        }
+
+        return false;
+    }
+
+    private void SeedDefaultsIfEmpty()
+    {
+        using var connection = new SqliteConnection(_connectionString);
+        connection.Open();
+        using var countCommand = connection.CreateCommand();
+        countCommand.CommandText = "SELECT COUNT(*) FROM quest_definitions;";
+        var count = Convert.ToInt32(countCommand.ExecuteScalar());
+        if (count > 0)
+        {
+            return;
+        }
+
+        UpsertDefinition(
+            new QuestDefinitionSnapshot(
+                "gather-first-log",
+                "A Worker’s Beginning",
+                "Gather wood from the nearby tree and return with proof of effort.",
+                "gather_log",
+                3,
+                25,
+                "settlers",
+                5,
+                "questgiver-1"),
+            "seed");
     }
 }
