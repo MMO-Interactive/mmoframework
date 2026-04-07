@@ -21,6 +21,7 @@ public sealed class VoxelDemoBootstrap : MonoBehaviour
     private const int ChunkResolution = 16;
     private const float VoxelSize = 1f;
     private const int TerrainSeed = 1337;
+    private const TerrainEngineKind TerrainEngine = TerrainEngineKind.Hybrid;
     private const float WaterLevel = ProceduralVoxelWorldGenerator.DefaultWaterLevel;
 
     private readonly Dictionary<Int3, PooledChunkVisual> _chunkVisuals = new();
@@ -39,6 +40,7 @@ public sealed class VoxelDemoBootstrap : MonoBehaviour
     private readonly ConcurrentDictionary<Int3, VoxelChunk> _chunkCache = new();
     private readonly ConcurrentDictionary<Int3, ChunkRenderData?> _meshCache = new();
     private readonly Dictionary<ushort, Material> _materialCache = new();
+    private readonly AdaptiveTerrainGenerator _terrainGenerator = new(engineKind: TerrainEngine, seed: TerrainSeed);
 
     private Int3 _lastViewerChunk;
     private bool _hasViewerChunk;
@@ -589,7 +591,7 @@ public sealed class VoxelDemoBootstrap : MonoBehaviour
     {
         var world = new VoxelWorld(ChunkResolution, VoxelSize);
         var mesher = new SmoothVoxelMesher();
-        var generator = new ProceduralVoxelWorldGenerator(seed: TerrainSeed);
+        var generator = _terrainGenerator;
         var loadedSupportCoordinates = new HashSet<Int3>();
 
         for (var i = 0; i < coordinates.Count; i++)
@@ -632,7 +634,7 @@ public sealed class VoxelDemoBootstrap : MonoBehaviour
         int version,
         VoxelWorld world,
         SmoothVoxelMesher mesher,
-        ProceduralVoxelWorldGenerator generator)
+        AdaptiveTerrainGenerator generator)
     {
         var generateDetailMeshes = RequiresDetailedRender(coordinate, viewerChunk);
 
@@ -657,11 +659,10 @@ public sealed class VoxelDemoBootstrap : MonoBehaviour
 
     private VoxelChunk GetOrCreateCachedChunk(Int3 coordinate)
     {
-        return _chunkCache.GetOrAdd(coordinate, static chunkCoordinate =>
+        return _chunkCache.GetOrAdd(coordinate, chunkCoordinate =>
         {
-            var generator = new ProceduralVoxelWorldGenerator(seed: TerrainSeed);
             var chunk = new VoxelChunk(chunkCoordinate, ChunkResolution, VoxelSize);
-            generator.PopulateChunk(chunk);
+            _terrainGenerator.PopulateChunk(chunk);
             return chunk;
         });
     }
@@ -913,7 +914,7 @@ public sealed class VoxelDemoBootstrap : MonoBehaviour
         material.SetFloat("_Metallic", 0.02f);
     }
 
-    private static ChunkEnvironmentData BuildChunkEnvironmentData(Int3 coordinate, ProceduralVoxelWorldGenerator generator)
+    private static ChunkEnvironmentData BuildChunkEnvironmentData(Int3 coordinate, AdaptiveTerrainGenerator generator)
     {
         var sampleCount = ChunkResolution + 3;
         var originX = (coordinate.X * ChunkResolution) - 1f;
