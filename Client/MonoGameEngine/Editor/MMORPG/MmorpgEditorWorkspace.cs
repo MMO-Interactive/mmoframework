@@ -15,11 +15,15 @@ public sealed class MmorpgEditorWorkspace
 
     public ZoneDefinition ActiveZone { get; private set; }
 
+    public int Seed => _seed;
+
     public AdaptiveTerrainGenerator TerrainGenerator { get; private set; }
 
     public List<NpcSpawnPoint> NpcSpawns { get; } = new();
 
     public List<ResourceSpawnPoint> ResourceSpawns { get; } = new();
+
+    public List<StructureBoxPlacement> StructureBoxes { get; } = new();
 
     public void SetZone(string zoneId, int widthTiles = 256, int heightTiles = 256)
     {
@@ -34,16 +38,38 @@ public sealed class MmorpgEditorWorkspace
 
     public void PlaceStructureBox(Point minGrid, Point maxGrid, int baseY, int topY, ushort materialId)
     {
-        TerrainGenerator.AddStructureBox(
-            new Int3(minGrid.X, baseY, minGrid.Y),
-            new Int3(maxGrid.X, topY, maxGrid.Y),
-            materialId);
+        var placement = new StructureBoxPlacement(minGrid, maxGrid, baseY, topY, materialId);
+        StructureBoxes.Add(placement);
+        ApplyStructureBox(placement);
     }
 
     public void RegenerateTerrain()
     {
         _seed += 17;
         TerrainGenerator = CreateTerrainGenerator();
+        ReapplyStructures();
+    }
+
+    public void RestoreState(
+        int seed,
+        ZoneDefinition activeZone,
+        IEnumerable<NpcSpawnPoint> npcSpawns,
+        IEnumerable<ResourceSpawnPoint> resourceSpawns,
+        IEnumerable<StructureBoxPlacement> structureBoxes)
+    {
+        _seed = seed;
+        ActiveZone = activeZone;
+
+        NpcSpawns.Clear();
+        ResourceSpawns.Clear();
+        StructureBoxes.Clear();
+
+        NpcSpawns.AddRange(npcSpawns);
+        ResourceSpawns.AddRange(resourceSpawns);
+        StructureBoxes.AddRange(structureBoxes);
+
+        TerrainGenerator = CreateTerrainGenerator();
+        ReapplyStructures();
     }
 
     private AdaptiveTerrainGenerator CreateTerrainGenerator()
@@ -55,5 +81,21 @@ public sealed class MmorpgEditorWorkspace
             maxTileCornerStep: 2.5f,
             structureChunkResolution: 16,
             structureVoxelSize: 1f);
+    }
+
+    private void ReapplyStructures()
+    {
+        foreach (var structure in StructureBoxes)
+        {
+            ApplyStructureBox(structure);
+        }
+    }
+
+    private void ApplyStructureBox(StructureBoxPlacement placement)
+    {
+        TerrainGenerator.AddStructureBox(
+            new Int3(placement.Min.X, placement.BaseY, placement.Min.Y),
+            new Int3(placement.Max.X, placement.TopY, placement.Max.Y),
+            placement.MaterialId);
     }
 }
