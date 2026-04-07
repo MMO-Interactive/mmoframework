@@ -24,6 +24,7 @@ public sealed class CodexUnityControlWindow : EditorWindow
 
     private readonly ConcurrentQueue<string> _bridgeProgressMessages = new();
     private readonly List<string> _log = new();
+    private readonly List<string> _attachedImagePaths = new();
     private readonly object _bridgeLock = new();
     private Vector2 _scroll;
     private string _prompt = "Populate this scene with an MMORPG starter-area layout.";
@@ -62,6 +63,8 @@ public sealed class CodexUnityControlWindow : EditorWindow
 
         EditorGUILayout.LabelField("Prompt");
         _prompt = EditorGUILayout.TextArea(_prompt, GUILayout.MinHeight(72));
+
+        DrawAttachmentControls();
 
         using (new EditorGUI.DisabledScope(_isRunning))
         {
@@ -115,7 +118,13 @@ public sealed class CodexUnityControlWindow : EditorWindow
 
         Log("Sending prompt to Codex...");
 
-        var requestJson = BuildRequestJson(_prompt);
+        var validAttachments = GetValidAttachedImagePaths();
+        if (validAttachments.Length > 0)
+        {
+            Log($"Including {validAttachments.Length} image attachment(s).");
+        }
+
+        var requestJson = BuildRequestJson(_prompt, validAttachments);
         Task.Run(() =>
         {
             string output = null;
@@ -137,6 +146,89 @@ public sealed class CodexUnityControlWindow : EditorWindow
             }
         });
     }
+
+    private void DrawAttachmentControls()
+    {
+        EditorGUILayout.Space(6);
+        EditorGUILayout.LabelField("Image Attachments", EditorStyles.boldLabel);
+        EditorGUILayout.HelpBox("Attach screenshots or reference images from disk. They are sent to Codex as local image inputs, not embedded into generated Unity assets.", MessageType.Info);
+
+        EditorGUILayout.BeginHorizontal();
+        if (GUILayout.Button("Attach Image/Screenshot...", GUILayout.Height(24)))
+        {
+            var selectedPath = EditorUtility.OpenFilePanelWithFilters(
+                "Attach image or screenshot for Codex",
+                "",
+                new[] { "Image files", "png,jpg,jpeg,bmp,gif,tga", "All files", "*" });
+
+            if (!string.IsNullOrWhiteSpace(selectedPath))
+            {
+                AddImageAttachment(selectedPath);
+            }
+        }
+
+        using (new EditorGUI.DisabledScope(_attachedImagePaths.Count == 0))
+        {
+            if (GUILayout.Button("Clear Attachments", GUILayout.Height(24)))
+            {
+                _attachedImagePaths.Clear();
+                Log("Cleared Codex image attachments.");
+            }
+        }
+
+        EditorGUILayout.EndHorizontal();
+
+        if (_attachedImagePaths.Count == 0)
+        {
+            EditorGUILayout.LabelField("No images attached.", EditorStyles.miniLabel);
+            return;
+        }
+
+        for (var index = _attachedImagePaths.Count - 1; index >= 0; index--)
+        {
+            var path = _attachedImagePaths[index];
+            EditorGUILayout.BeginHorizontal();
+            EditorGUILayout.LabelField($"{Path.GetFileName(path)}  ({path})", EditorStyles.miniLabel);
+            if (GUILayout.Button("Remove", GUILayout.Width(72)))
+            {
+                Log($"Removed Codex image attachment: {Path.GetFileName(path)}");
+                _attachedImagePaths.RemoveAt(index);
+            }
+
+            EditorGUILayout.EndHorizontal();
+        }
+    }
+
+    private void AddImageAttachment(string selectedPath)
+    {
+        var fullPath = Path.GetFullPath(selectedPath);
+        if (!File.Exists(fullPath))
+        {
+            Log($"Attachment skipped; file does not exist: {selectedPath}");
+            return;
+        }
+
+        if (!IsSupportedImagePath(fullPath))
+        {
+            Log($"Attachment skipped; unsupported image extension: {selectedPath}");
+            return;
+        }
+
+        if (_attachedImagePaths.Any(path => string.Equals(Path.GetFullPath(path), fullPath, StringComparison.OrdinalIgnoreCase)))
+        {
+            Log($"Attachment already included: {Path.GetFileName(fullPath)}");
+            return;
+        }
+
+        _attachedImagePaths.Add(fullPath);
+        Log($"Attached image for Codex: {Path.GetFileName(fullPath)}");
+    }
+
+    private string[] GetValidAttachedImagePaths()
+        => _attachedImagePaths
+            .Select(path => Path.GetFullPath(path))
+            .Where(path => File.Exists(path) && IsSupportedImagePath(path))
+            .ToArray();
 
     private void PollCodexBridgeRequest()
     {
@@ -305,7 +397,18 @@ public sealed class CodexUnityControlWindow : EditorWindow
         return Path.GetFullPath(Path.Combine(Application.dataPath, "..", "CodexBridge", "unity-codex-bridge.mjs"));
     }
 
-    private static string BuildRequestJson(string prompt)
+    private static bool IsSupportedImagePath(string path)
+    {
+        var extension = Path.GetExtension(path);
+        return string.Equals(extension, ".png", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(extension, ".jpg", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(extension, ".jpeg", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(extension, ".bmp", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(extension, ".gif", StringComparison.OrdinalIgnoreCase)
+            || string.Equals(extension, ".tga", StringComparison.OrdinalIgnoreCase);
+    }
+
+    private static string BuildRequestJson(string prompt, string[] attachedImagePaths)
     {
         var unityProjectRoot = Path.GetFullPath(Path.Combine(Application.dataPath, ".."));
         var repoRoot = Path.GetFullPath(Path.Combine(unityProjectRoot, "..", ".."));
@@ -330,7 +433,8 @@ public sealed class CodexUnityControlWindow : EditorWindow
             activeScenePath = activeScene,
             selectedObjects = selectedObjects,
             sceneObjects = sceneObjects,
-            knownScenes = knownScenes
+            knownScenes = knownScenes,
+            attachedImagePaths = attachedImagePaths ?? Array.Empty<string>()
         });
     }
 
@@ -385,6 +489,15 @@ public sealed class CodexUnityControlWindow : EditorWindow
             case "set_parent":
                 SetParent(action);
                 break;
+            case "rename_object":
+                RenameObject(action);
+                break;
+            case "set_active":
+                SetActive(action);
+                break;
+            case "destroy_object":
+                DestroyObject(action);
+                break;
             case "create_canvas":
                 CreateCanvas(action);
                 break;
@@ -399,6 +512,15 @@ public sealed class CodexUnityControlWindow : EditorWindow
                 break;
             case "create_ui_image":
                 CreateUiImage(action);
+                break;
+            case "set_ui_text":
+                SetUiText(action);
+                break;
+            case "set_ui_color":
+                SetUiColor(action);
+                break;
+            case "set_ui_rect":
+                SetUiRect(action);
                 break;
             case "create_material":
                 CreateMaterial(action);
@@ -478,6 +600,48 @@ public sealed class CodexUnityControlWindow : EditorWindow
         }
 
         Undo.SetTransformParent(child.transform, ResolveParent(action.parent), "Codex set parent");
+    }
+
+    private static void RenameObject(CodexUnityAction action)
+    {
+        var go = FindObjectByName(action.name);
+        if (go == null)
+        {
+            throw new InvalidOperationException("Object not found: " + action.name);
+        }
+
+        if (string.IsNullOrWhiteSpace(action.newName))
+        {
+            throw new InvalidOperationException("newName is required for rename_object.");
+        }
+
+        Undo.RecordObject(go, "Codex rename object");
+        go.name = action.newName;
+        Selection.activeGameObject = go;
+    }
+
+    private static void SetActive(CodexUnityAction action)
+    {
+        var go = FindObjectByName(action.name);
+        if (go == null)
+        {
+            throw new InvalidOperationException("Object not found: " + action.name);
+        }
+
+        Undo.RecordObject(go, "Codex set active");
+        go.SetActive(action.active);
+        Selection.activeGameObject = go;
+    }
+
+    private static void DestroyObject(CodexUnityAction action)
+    {
+        var go = FindObjectByName(action.name);
+        if (go == null)
+        {
+            throw new InvalidOperationException("Object not found: " + action.name);
+        }
+
+        Undo.DestroyObjectImmediate(go);
     }
 
     private static void AddComponent(CodexUnityAction action)
@@ -568,6 +732,106 @@ public sealed class CodexUnityControlWindow : EditorWindow
         var label = CreateUiObject(labelAction, "Label", typeof(Text));
         ConfigureText(label.GetComponent<Text>(), labelAction, labelAction.text);
 
+        Selection.activeGameObject = go;
+    }
+
+    private static void SetUiText(CodexUnityAction action)
+    {
+        var go = FindObjectByName(action.name);
+        if (go == null)
+        {
+            throw new InvalidOperationException("Object not found: " + action.name);
+        }
+
+        var text = go.GetComponent<Text>();
+        if (text == null)
+        {
+            throw new InvalidOperationException("Object has no UnityEngine.UI.Text component: " + action.name);
+        }
+
+        Undo.RecordObject(text, "Codex set UI text");
+        if (!string.IsNullOrWhiteSpace(action.text))
+        {
+            text.text = action.text;
+        }
+
+        text.font = text.font == null ? GetDefaultUiFont() : text.font;
+        if (action.fontSize > 0)
+        {
+            text.fontSize = action.fontSize;
+        }
+
+        if (!string.IsNullOrWhiteSpace(action.alignment) && Enum.TryParse(action.alignment, ignoreCase: true, out TextAnchor alignment))
+        {
+            text.alignment = alignment;
+        }
+
+        var hasColor = action.r != 0f || action.g != 0f || action.b != 0f || action.a != 0f;
+        if (hasColor)
+        {
+            text.color = ResolveColor(action, text.color);
+        }
+
+        text.horizontalOverflow = HorizontalWrapMode.Wrap;
+        text.verticalOverflow = VerticalWrapMode.Truncate;
+        EditorUtility.SetDirty(text);
+        Selection.activeGameObject = go;
+    }
+
+    private static void SetUiColor(CodexUnityAction action)
+    {
+        var go = FindObjectByName(action.name);
+        if (go == null)
+        {
+            throw new InvalidOperationException("Object not found: " + action.name);
+        }
+
+        var graphic = go.GetComponent<Graphic>();
+        if (graphic != null)
+        {
+            Undo.RecordObject(graphic, "Codex set UI color");
+            graphic.color = ResolveColor(action, graphic.color);
+            EditorUtility.SetDirty(graphic);
+            Selection.activeGameObject = go;
+            return;
+        }
+
+        var renderer = go.GetComponent<Renderer>();
+        if (renderer != null)
+        {
+            Undo.RecordObject(renderer, "Codex set renderer color");
+            var material = renderer.sharedMaterial;
+            if (material == null)
+            {
+                throw new InvalidOperationException("Object has no shared material to recolor: " + action.name);
+            }
+
+            Undo.RecordObject(material, "Codex set material color");
+            material.color = ResolveColor(action, material.color);
+            EditorUtility.SetDirty(material);
+            Selection.activeGameObject = go;
+            return;
+        }
+
+        throw new InvalidOperationException("Object has no UI Graphic or Renderer to recolor: " + action.name);
+    }
+
+    private static void SetUiRect(CodexUnityAction action)
+    {
+        var go = FindObjectByName(action.name);
+        if (go == null)
+        {
+            throw new InvalidOperationException("Object not found: " + action.name);
+        }
+
+        if (go.transform is not RectTransform rectTransform)
+        {
+            throw new InvalidOperationException("Object is not a RectTransform UI object: " + action.name);
+        }
+
+        Undo.RecordObject(rectTransform, "Codex set UI rect");
+        ApplyRectTransform(rectTransform, action);
+        EditorUtility.SetDirty(rectTransform);
         Selection.activeGameObject = go;
     }
 
@@ -919,6 +1183,7 @@ public sealed class CodexUnityControlWindow : EditorWindow
         public string[] selectedObjects;
         public string[] sceneObjects;
         public string[] knownScenes;
+        public string[] attachedImagePaths;
     }
 
     [Serializable]
@@ -952,6 +1217,7 @@ public sealed class CodexUnityControlWindow : EditorWindow
     {
         public string type;
         public string name;
+        public string newName;
         public string primitive;
         public string component;
         public string assetPath;
@@ -962,6 +1228,7 @@ public sealed class CodexUnityControlWindow : EditorWindow
         public string content;
         public string alignment;
         public string layout;
+        public bool active = true;
         public bool overwrite = true;
         public float x;
         public float y;
@@ -997,6 +1264,7 @@ public sealed class CodexUnityControlWindow : EditorWindow
             {
                 type = type,
                 name = childName,
+                newName = newName,
                 primitive = primitive,
                 component = component,
                 assetPath = assetPath,
@@ -1007,6 +1275,7 @@ public sealed class CodexUnityControlWindow : EditorWindow
                 content = content,
                 alignment = alignment,
                 layout = layout,
+                active = active,
                 overwrite = overwrite,
                 x = x,
                 y = y,
