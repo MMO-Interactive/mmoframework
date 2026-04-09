@@ -32,3 +32,28 @@ var indices = mesh.ToIndexArray();
 ```
 
 That keeps this library independent from Unity while still making it easy to build a Unity adapter on top.
+
+
+## Terrain engine options
+
+`VoxelLibrary` now includes an `AdaptiveTerrainGenerator` that supports:
+
+- `TerrainEngineKind.Voxel`: full volumetric terrain (best for caves/destructibility)
+- `TerrainEngineKind.Tile`: Wurm-style tile map terrain with stepped tile corners
+- `TerrainEngineKind.Hybrid`: Wurm-style tile terrain with a voxel building layer
+
+For an MMORPG framework, **Hybrid** is the default recommendation when you want **Wurm-style tile terrain plus voxel buildings**: terrain comes from the tile map while player-made structures are authored as voxels on top.
+
+```csharp
+var terrain = new AdaptiveTerrainGenerator(
+    engineKind: TerrainEngineKind.Hybrid,
+    seed: 1337,
+    tileSize: 4f,
+    maxTileCornerStep: 3f);
+
+// Optional: place voxel structures in world grid space.
+terrain.AddStructureBox(new Int3(10, 14, 10), new Int3(14, 18, 14), materialId: 9);
+
+var chunk = new VoxelChunk(Int3.Zero, resolution: 16, voxelSize: 1f);
+terrain.PopulateChunk(chunk);
+```
