@@ -40,15 +40,6 @@ Workspace save files are written under `EditorData/` next to the built executabl
 dotnet run --project Client/MonoGameEngine/MonoGameEngine.csproj
 ```
 
-## Dedicated MMORPG Editor
-
-The standalone AI-first MMORPG editor lives in `Client/MonoGameMmorpgEditor`.
-Run it with:
-
-```bash
-dotnet run --project Client/MonoGameMmorpgEditor/MonoGameMmorpgEditor.csproj
-```
-
 ## Controls
 
 - Move square: `WASD` or arrow keys

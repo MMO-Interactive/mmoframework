@@ -57,11 +57,6 @@ public sealed partial class RuleBasedEditorAssistant : IEditorAssistant
             actions.Add(new AddNpcSpawnAction(npcArchetype, npcLevel, npcPosition));
         }
 
-        if (TryExtractNpcGroupSpawn(normalized, out var npcGroupActions))
-        {
-            actions.AddRange(npcGroupActions);
-        }
-
         if (TryExtractResourceSpawn(normalized, out var resourceType, out var resourcePosition))
         {
             actions.Add(new AddResourceSpawnAction(resourceType, resourcePosition));
@@ -138,11 +133,6 @@ public sealed partial class RuleBasedEditorAssistant : IEditorAssistant
         var match = ZoneRegex().Match(prompt);
         if (!match.Success)
         {
-            match = NamedZoneRegex().Match(prompt);
-        }
-
-        if (!match.Success)
-        {
             return false;
         }
 
@@ -181,56 +171,12 @@ public sealed partial class RuleBasedEditorAssistant : IEditorAssistant
         return true;
     }
 
-    private static bool TryExtractNpcGroupSpawn(string prompt, out IReadOnlyList<EditorAction> actions)
-    {
-        actions = Array.Empty<EditorAction>();
-
-        var match = NpcGroupRegex().Match(prompt);
-        if (!match.Success)
-        {
-            return false;
-        }
-
-        var count = ParseCount(match.Groups[1].Value);
-        var level = 1;
-        if (match.Groups[2].Success)
-        {
-            _ = int.TryParse(match.Groups[2].Value, NumberStyles.Integer, CultureInfo.InvariantCulture, out level);
-        }
-
-        level = Math.Clamp(level, 1, 120);
-        var archetype = SingularizeArchetype(match.Groups[3].Value);
-
-        if (!float.TryParse(match.Groups[4].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var x)
-            || !float.TryParse(match.Groups[5].Value, NumberStyles.Float, CultureInfo.InvariantCulture, out var z))
-        {
-            return false;
-        }
-
-        count = Math.Clamp(count, 1, 20);
-        var spawned = new List<EditorAction>(count);
-        for (var i = 0; i < count; i++)
-        {
-            var offsetX = (i % 5) * 3f;
-            var offsetZ = (i / 5) * 3f;
-            spawned.Add(new AddNpcSpawnAction(archetype, level, new Vector2(x + offsetX, z + offsetZ)));
-        }
-
-        actions = spawned;
-        return true;
-    }
-
     private static bool TryExtractResourceSpawn(string prompt, out string resourceType, out Vector2 position)
     {
         resourceType = string.Empty;
         position = Vector2.Zero;
 
         var match = ResourceRegex().Match(prompt);
-        if (!match.Success)
-        {
-            match = NaturalResourceRegex().Match(prompt);
-        }
-
         if (!match.Success)
         {
             return false;
@@ -246,37 +192,6 @@ public sealed partial class RuleBasedEditorAssistant : IEditorAssistant
 
         position = new Vector2(x, z);
         return true;
-    }
-
-    private static int ParseCount(string value)
-        => value switch
-        {
-            "one" => 1,
-            "two" => 2,
-            "three" => 3,
-            "four" => 4,
-            "five" => 5,
-            "six" => 6,
-            "seven" => 7,
-            "eight" => 8,
-            "nine" => 9,
-            "ten" => 10,
-            _ => int.TryParse(value, NumberStyles.Integer, CultureInfo.InvariantCulture, out var parsed) ? parsed : 1
-        };
-
-    private static string SingularizeArchetype(string archetype)
-    {
-        if (archetype.Equals("wolves", StringComparison.Ordinal))
-        {
-            return "wolf";
-        }
-
-        if (archetype.EndsWith("ies", StringComparison.Ordinal) && archetype.Length > 3)
-        {
-            return archetype[..^3] + "y";
-        }
-
-        return archetype.EndsWith('s') && archetype.Length > 1 ? archetype[..^1] : archetype;
     }
 
     private static bool TryExtractStructureBox(string prompt, out Point min, out Point max, out int baseY, out int topY, out ushort materialId)
@@ -390,20 +305,11 @@ public sealed partial class RuleBasedEditorAssistant : IEditorAssistant
     [GeneratedRegex(@"(?:zone|set zone)\s+([a-z0-9_\-]+)", RegexOptions.Compiled)]
     private static partial Regex ZoneRegex();
 
-    [GeneratedRegex(@"(?:create|make|set)\s+(?:a\s+)?(?:starter\s+)?zone\s+(?:called|named)\s+([a-z0-9_\-]+)", RegexOptions.Compiled)]
-    private static partial Regex NamedZoneRegex();
-
     [GeneratedRegex(@"(?:add|spawn)\s+npc\s+([a-z0-9_\-]+)\s+level\s+(\d+)\s+at\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)", RegexOptions.Compiled)]
     private static partial Regex NpcRegex();
 
-    [GeneratedRegex(@"(?:add|spawn|place)\s+(one|two|three|four|five|six|seven|eight|nine|ten|\d+)\s+(?:level\s+(\d+)\s+)?([a-z0-9_\-]+)s?\s+(?:near|at)\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)", RegexOptions.Compiled)]
-    private static partial Regex NpcGroupRegex();
-
     [GeneratedRegex(@"add\s+resource\s+([a-z0-9_\-]+)\s+at\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)", RegexOptions.Compiled)]
     private static partial Regex ResourceRegex();
-
-    [GeneratedRegex(@"(?:place|add|spawn)\s+(?:an?\s+)?([a-z0-9_\-]+(?:\s+[a-z0-9_\-]+)?)\s+(?:resource\s+)?(?:near|at)\s*(-?\d+(?:\.\d+)?)\s*[, ]\s*(-?\d+(?:\.\d+)?)", RegexOptions.Compiled)]
-    private static partial Regex NaturalResourceRegex();
 
     [GeneratedRegex(@"(?:build|place)\s+box\s+(-?\d+)\s*[, ]\s*(-?\d+)\s*[, ]\s*(-?\d+)\s*[, ]\s*(-?\d+)(?:\s+base\s+(-?\d+))?(?:\s+top\s+(-?\d+))?(?:\s+material\s+(\d+))?", RegexOptions.Compiled)]
     private static partial Regex StructureRegex();

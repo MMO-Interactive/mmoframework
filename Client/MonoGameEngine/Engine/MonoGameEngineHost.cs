@@ -49,7 +49,7 @@ public abstract class MonoGameEngineHost : Game
     protected override void Draw(GameTime gameTime)
     {
         var context = BuildContext((float)gameTime.ElapsedGameTime.TotalSeconds);
-        GraphicsDevice.Clear(ClearOptions.Target | ClearOptions.DepthBuffer, new Color(13, 17, 24), 1f, 0);
+        GraphicsDevice.Clear(new Color(13, 17, 24));
 
         _sceneManager.Draw(context);
         base.Draw(gameTime);

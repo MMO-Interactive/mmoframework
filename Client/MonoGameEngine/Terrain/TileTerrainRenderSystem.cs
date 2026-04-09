@@ -9,8 +9,6 @@ namespace MonoGameEngine.Terrain;
 public sealed class TileTerrainRenderSystem : ISceneSystem
 {
     private readonly EditorWorldState _worldState;
-    private readonly Func<Viewport, Rectangle>? _viewportFactory;
-    private readonly TileTerrainCamera _camera;
 
     private BasicEffect? _effect;
     private VertexBuffer? _vertexBuffer;
@@ -18,14 +16,14 @@ public sealed class TileTerrainRenderSystem : ISceneSystem
 
     private int _primitiveCount;
 
-    public TileTerrainRenderSystem(
-        EditorWorldState worldState,
-        Func<Viewport, Rectangle>? viewportFactory = null,
-        TileTerrainCamera? camera = null)
+    private float _yaw = 0.8f;
+    private float _pitch = 0.65f;
+    private float _distance = 220f;
+    private Vector3 _target = new(96f, 12f, 96f);
+
+    public TileTerrainRenderSystem(EditorWorldState worldState)
     {
         _worldState = worldState;
-        _viewportFactory = viewportFactory;
-        _camera = camera ?? new TileTerrainCamera();
     }
 
     public void Initialize(EngineContext context)
@@ -41,12 +39,22 @@ public sealed class TileTerrainRenderSystem : ISceneSystem
 
     public void Update(EngineContext context)
     {
-        _camera.Update(context);
+        var input = context.Input;
 
-        if (_worldState.TerrainRegenerationRequested || context.Input.IsPressed(Keys.R))
+        if (input.IsDown(Keys.Left)) _yaw += 1.4f * context.DeltaSeconds;
+        if (input.IsDown(Keys.Right)) _yaw -= 1.4f * context.DeltaSeconds;
+        if (input.IsDown(Keys.Up)) _pitch += 1.0f * context.DeltaSeconds;
+        if (input.IsDown(Keys.Down)) _pitch -= 1.0f * context.DeltaSeconds;
+        if (input.IsDown(Keys.Q)) _distance += 80f * context.DeltaSeconds;
+        if (input.IsDown(Keys.E)) _distance -= 80f * context.DeltaSeconds;
+
+        _pitch = Math.Clamp(_pitch, 0.15f, 1.3f);
+        _distance = Math.Clamp(_distance, 90f, 420f);
+
+        if (_worldState.TerrainRegenerationRequested || input.IsPressed(Keys.R))
         {
             _worldState.TerrainRegenerationRequested = false;
-            if (context.Input.IsPressed(Keys.R))
+            if (input.IsPressed(Keys.R))
             {
                 _worldState.Workspace.RegenerateTerrain();
             }
@@ -63,21 +71,24 @@ public sealed class TileTerrainRenderSystem : ISceneSystem
         }
 
         var graphics = context.GraphicsDevice;
-        var originalViewport = graphics.Viewport;
-        var originalBlendState = graphics.BlendState;
-        var originalDepthStencilState = graphics.DepthStencilState;
-        var originalRasterizerState = graphics.RasterizerState;
-        var viewportRectangle = _viewportFactory?.Invoke(originalViewport) ?? originalViewport.Bounds;
-        graphics.Viewport = new Viewport(viewportRectangle);
         graphics.BlendState = BlendState.Opaque;
         graphics.DepthStencilState = DepthStencilState.Default;
         graphics.RasterizerState = RasterizerState.CullCounterClockwise;
-        graphics.Clear(ClearOptions.DepthBuffer, Color.Transparent, 1f, 0);
 
-        _camera.BuildMatrices(graphics.Viewport);
+        var cameraOffset = new Vector3(
+            MathF.Cos(_yaw) * MathF.Cos(_pitch),
+            MathF.Sin(_pitch),
+            MathF.Sin(_yaw) * MathF.Cos(_pitch)) * _distance;
+
+        var cameraPosition = _target + cameraOffset;
+
         _effect.World = Matrix.Identity;
-        _effect.View = _camera.View;
-        _effect.Projection = _camera.Projection;
+        _effect.View = Matrix.CreateLookAt(cameraPosition, _target, Vector3.Up);
+        _effect.Projection = Matrix.CreatePerspectiveFieldOfView(
+            MathHelper.PiOver4,
+            graphics.Viewport.AspectRatio,
+            0.1f,
+            2000f);
 
         graphics.SetVertexBuffer(_vertexBuffer);
         graphics.Indices = _indexBuffer;
@@ -87,11 +98,6 @@ public sealed class TileTerrainRenderSystem : ISceneSystem
             pass.Apply();
             graphics.DrawIndexedPrimitives(PrimitiveType.TriangleList, 0, 0, _primitiveCount);
         }
-
-        graphics.Viewport = originalViewport;
-        graphics.BlendState = originalBlendState;
-        graphics.DepthStencilState = originalDepthStencilState;
-        graphics.RasterizerState = originalRasterizerState;
     }
 
     private void RebuildTerrain(GraphicsDevice graphicsDevice)
