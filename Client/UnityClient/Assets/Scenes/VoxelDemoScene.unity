@@ -365,6 +365,16 @@ MonoBehaviour:
   m_Script: {fileID: 11500000, guid: d1d8d98f3b03440490d6b8f7c8ca3211, type: 3}
   m_Name: 
   m_EditorClassIdentifier: 
+  visibleChunkRadius: 5
+  verticalChunkCount: 5
+  detailChunkRadius: 2
+  chunksPerBackgroundJob: 4
+  maxBackgroundJobs: 2
+  maxChunkCreatesPerFrame: 2
+  maxChunkRemovalsPerFrame: 8
+  colliderChunkRadius: 1
+  maxColliderAssignmentsPerFrame: 1
+  viewer: {fileID: 0}
 --- !u!1660057539 &9223372036854775807
 SceneRoots:
   m_ObjectHideFlags: 0

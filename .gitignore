@@ -31,6 +31,9 @@ MemoryCaptures/
 bin/
 obj/
 
+## Node
+node_modules/
+
 ## Local smoke logs
 *.out.log
 *.err.log
